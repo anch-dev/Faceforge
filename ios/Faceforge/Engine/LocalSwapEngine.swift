@@ -49,22 +49,19 @@ final class LocalSwapEngine {
                 cached["ModelCacheDirectory"] = cacheDir.path
                 attempts = [cached, base]
             }
-            attempts.append(nil)  // CPU (XNNPACK-accelerated when available)
+            attempts.append(nil)  // CPU
             var lastError: Error?
             for cfg in attempts {
-                let label = cfg == nil ? "CPU/XNNPACK" : (cfg?["ModelCacheDirectory"] != nil ? "CoreML+cache" : "CoreML")
+                let label = cfg == nil ? "CPU" : (cfg?["ModelCacheDirectory"] != nil ? "CoreML+cache" : "CoreML")
                 let t0 = CFAbsoluteTimeGetCurrent()
                 do {
                     let o = try ORTSessionOptions()
                     try o.setGraphOptimizationLevel(.all)
                     try? o.setLogSeverityLevel(Log.verbose ? .info : .warning)
-                    if let cfg = cfg {
-                        try o.appendCoreMLExecutionProvider(withOptionsV2: cfg)
-                    } else {
-                        let xnn = ORTXnnpackExecutionProviderOptions()
-                        xnn.intra_op_num_threads = 4
-                        try? o.appendXnnpackExecutionProvider(with: xnn)
-                    }
+                    // Plain CPU fallback. Not XNNPACK: with det_10g's dynamic input it
+                    // aborted the process (uncaught C++ exception during session
+                    // init) on iPhone 16 Pro Max / ORT 1.28.0.
+                    if let cfg = cfg { try o.appendCoreMLExecutionProvider(withOptionsV2: cfg) }
                     let session = try ORTSession(env: env, modelPath: path.path, sessionOptions: o)
                     Log.info("\(path.lastPathComponent): session ready on \(label) in "
                              + String(format: "%.1f s", CFAbsoluteTimeGetCurrent() - t0), "engine")
