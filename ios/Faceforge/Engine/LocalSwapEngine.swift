@@ -46,13 +46,19 @@ final class LocalSwapEngine {
                 cached["ModelCacheDirectory"] = cacheDir.path
                 attempts = [cached, base]
             }
-            attempts.append(nil)  // CPU
+            attempts.append(nil)  // CPU (XNNPACK-accelerated when available)
             var lastError: Error?
             for cfg in attempts {
                 do {
                     let o = try ORTSessionOptions()
                     try o.setGraphOptimizationLevel(.all)
-                    if let cfg = cfg { try o.appendCoreMLExecutionProvider(withOptionsV2: cfg) }
+                    if let cfg = cfg {
+                        try o.appendCoreMLExecutionProvider(withOptionsV2: cfg)
+                    } else {
+                        let xnn = ORTXnnpackExecutionProviderOptions()
+                        xnn.intra_op_num_threads = 4
+                        try? o.appendXnnpackExecutionProvider(with: xnn)
+                    }
                     return (try ORTSession(env: env, modelPath: path.path, sessionOptions: o), cfg != nil)
                 } catch {
                     lastError = error
@@ -62,7 +68,10 @@ final class LocalSwapEngine {
         }
 
         try FileManager.default.createDirectory(at: cacheDir, withIntermediateDirectories: true)
-        let det = try makeSession(models.detector, coreML: useCoreML).0
+        // Detector stays on CPU: det_10g declares output shapes for 640 px input,
+        // and Core ML rejects the real 320 px shapes ("Invalid shape for output
+        // feature '_448'", seen on iPhone 16 Pro Max). ORT's CPU path accepts them.
+        let det = try makeSession(models.detector, coreML: false).0
         let rec = try makeSession(models.recognizer, coreML: false).0
         let (sw, coreMLActive) = try makeSession(models.swapper, coreML: useCoreML)
 
