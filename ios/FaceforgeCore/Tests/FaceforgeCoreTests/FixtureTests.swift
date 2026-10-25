@@ -191,3 +191,54 @@ final class TensorAndStatsTests: XCTestCase {
         XCTAssertTrue(ThermalPolicy.forState(3, userDetectEvery: 2).paused)
     }
 }
+
+final class FaceTrackTests: XCTestCase {
+    func testMotionMapsOldBoxOntoNew() {
+        let old = Box(x: 100, y: 200, w: 50, h: 60), new = Box(x: 130, y: 190, w: 75, h: 90)
+        let m = FaceTrack.motion(from: old, to: new)
+        let c = m.apply(Point2(x: old.cx, y: old.cy))
+        XCTAssertEqual(c.x, new.cx, accuracy: 1e-9)
+        XCTAssertEqual(c.y, new.cy, accuracy: 1e-9)
+        let corner = m.apply(Point2(x: old.x, y: old.y))
+        XCTAssertEqual(corner.x, new.x, accuracy: 1e-9)
+        XCTAssertEqual(corner.y, new.y, accuracy: 1e-9)
+    }
+
+    func testImplausibleJumpIsIgnored() {
+        let m = FaceTrack.motion(from: Box(x: 0, y: 0, w: 10, h: 10), to: Box(x: 0, y: 0, w: 40, h: 40))
+        XCTAssertEqual(m, .identity)
+        XCTAssertEqual(FaceTrack.motion(from: Box(x: 0, y: 0, w: 0, h: 10), to: Box(x: 5, y: 5, w: 10, h: 10)), .identity)
+    }
+
+    func testRetargetedCropSeesTheSameFacePixels() {
+        // A crop transform built at `old`, retargeted to `new`, must send the
+        // moved face point to the same crop pixel as the original did.
+        let crop = FaceAlign.estimateNorm(FaceAlign.arcfaceDst.map { Point2(x: $0.x * 2 + 300, y: $0.y * 2 + 400) }, size: 128)
+        let old = Box(x: 300, y: 400, w: 224, h: 224), new = Box(x: 340, y: 380, w: 246.4, h: 246.4)
+        let moved = FaceTrack.retarget(crop, from: old, to: new)
+        let p = Point2(x: 380, y: 520)
+        let q = FaceTrack.motion(from: old, to: new).apply(p)
+        let a = crop.apply(p), b = moved.apply(q)
+        XCTAssertEqual(a.x, b.x, accuracy: 1e-6)
+        XCTAssertEqual(a.y, b.y, accuracy: 1e-6)
+    }
+
+    func testComposeOrder() {
+        let s = Affine2D(a: 2, b: 0, tx: 0, c: 0, d: 2, ty: 0), t = Affine2D(a: 1, b: 0, tx: 5, c: 0, d: 1, ty: 0)
+        XCTAssertEqual(t.composed(after: s).apply(Point2(x: 1, y: 0)).x, 7, accuracy: 1e-12)   // scale, then shift
+        XCTAssertEqual(s.composed(after: t).apply(Point2(x: 1, y: 0)).x, 12, accuracy: 1e-12)  // shift, then scale
+    }
+
+    func testVisionBoxConversion() {
+        let b = Box.fromNormalizedBottomLeft(x: 0.25, y: 0.5, w: 0.5, h: 0.25, frameWidth: 720, frameHeight: 1280)
+        XCTAssertEqual(b, Box(x: 180, y: 320, w: 360, h: 320))
+    }
+
+    func testStridedGather() {
+        // 2x3 stored column-major (strides [1, 2]) -> row-major order.
+        let storage: [Float] = [1, 4, 2, 5, 3, 6]
+        XCTAssertEqual(Tensor.gather(shape: [2, 3], strides: [1, 2]) { storage[$0] }, [1, 2, 3, 4, 5, 6])
+        XCTAssertNil(Tensor.contiguousCount(shape: [2, 3], strides: [1, 2]))
+        XCTAssertEqual(Tensor.contiguousCount(shape: [1, 3, 4, 4], strides: [48, 16, 4, 1]), 48)
+    }
+}

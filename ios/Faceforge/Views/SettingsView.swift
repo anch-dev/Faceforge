@@ -32,14 +32,23 @@ struct SettingsView: View {
                         Button(s.id) { resolve(s.endpoint) }
                     }
                 }
-                Section("Live") {
+                Section {
                     Picker("Camera", selection: $settings.resolution) {
                         ForEach(CameraController.Resolution.allCases) { Text($0.rawValue).tag($0) }
                     }
                     Stepper("Detect face every \(settings.detectEvery) frames", value: $settings.detectEvery, in: 1...10)
-                    Toggle("Use Neural Engine (Core ML)", isOn: $settings.useCoreML)
+                    Toggle("Use Core ML (Neural Engine / GPU)", isOn: $settings.useCoreML)
+                    Picker("Swap runs on", selection: $settings.computeTarget) {
+                        ForEach(ComputeTarget.allCases) { Text($0.rawValue).tag($0) }
+                    }
+                    .disabled(!settings.useCoreML)
+                    Toggle("Smooth preview (camera at full rate)", isOn: $settings.smoothPreview)
                     Slider(value: $settings.jpegQuality, in: 0.4...0.95) { Text("PC image quality") }
                     Toggle("Show stats", isOn: $settings.showStats)
+                } header: {
+                    Text("Live")
+                } footer: {
+                    Text("Smooth preview shows every camera frame and keeps the most recent swapped face on your head between swaps. Neural Engine needs the fast model (Models tab); without it the swap uses the GPU. Changes apply at the next Start.")
                 }
                 Section {
                     Toggle("Verbose logging", isOn: $verbose)

@@ -13,6 +13,9 @@ public enum ModelCatalog {
         public let url: URL
         public let size: Int64
         public let sha256: String
+        public init(name: String, url: URL, size: Int64, sha256: String) {
+            self.name = name; self.url = url; self.size = size; self.sha256 = sha256
+        }
     }
 
     public static let inswapper = Asset(

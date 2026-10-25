@@ -58,10 +58,12 @@ struct PhotoSwapView: View {
             case .onDevice:
                 guard let paths = models.paths else { message = "Download the models first."; return }
                 let useCoreML = settings.useCoreML, cache = models.coreMLCacheDir
+                let fast = settings.preferFastModel ? models.fastModel : nil, target = settings.computeTarget
                 let existing = engine
                 let (eng, img, found) = try await Task.detached(priority: .userInitiated) {
                     () throws -> (LocalSwapEngine, CIImage, Bool) in
-                    let e = try existing ?? LocalSwapEngine(models: paths, useCoreML: useCoreML, cacheDir: cache)
+                    let e = try existing ?? LocalSwapEngine(models: paths, fast: fast, useCoreML: useCoreML,
+                                                                   target: target, cacheDir: cache)
                     try e.setSource(src)
                     e.detectEvery = 1
                     var timing = LocalSwapEngine.Timing()

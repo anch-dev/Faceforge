@@ -34,6 +34,18 @@ final class LiveSession: ObservableObject {
     private var thermalObserver: NSObjectProtocol?
     private var statsTimer: Timer?
 
+    // Smooth preview (camera-rate display, swap on its own queue).
+    private let tracker = FaceTracker()                 // camera queue
+    private let swapQueue = DispatchQueue(label: "faceforge.swap", qos: .userInitiated)
+    private var smooth = true                           // camera queue
+    private var swapBusy = false                        // camera queue
+    private var swapStats = FrameStats(window: 120)     // camera queue
+    private var lastSwapDone = 0.0                      // camera queue
+    private var trackMisses = 0                         // camera queue
+    private let resultLock = NSLock()
+    private var latestSwap: LocalSwapEngine.SwapResult? // resultLock
+    private var lastSwapText = ""                       // camera queue
+
     @MainActor
     func start(settings: AppSettings, models: ModelStore) async {
         guard !running else { return }
@@ -43,8 +55,21 @@ final class LiveSession: ObservableObject {
         }
         mode = settings.mode
         jpegQuality = settings.jpegQuality
+        let smoothOn = settings.smoothPreview
+        camera.videoQueue.sync {
+            smooth = smoothOn
+            swapBusy = false
+            swapStats.reset()
+            trackMisses = 0
+            lastFrameTime = 0
+            lastSwapDone = 0
+            lastSwapText = ""
+        }
+        resultLock.withLock { latestSwap = nil }
         Log.info("Live start: mode=\(settings.mode.rawValue) camera=\(settings.resolution.rawValue) "
-                 + "detectEvery=\(settings.detectEvery) coreML=\(settings.useCoreML) jpegQ=\(settings.jpegQuality)", "live")
+                 + "detectEvery=\(settings.detectEvery) coreML=\(settings.useCoreML) target=\(settings.computeTarget.rawValue) "
+                 + "fastModel=\(settings.preferFastModel ? (models.fastModel?.label ?? "none") : "off") "
+                 + "smooth=\(settings.smoothPreview) jpegQ=\(settings.jpegQuality)", "live")
         stats.reset()
         do {
             try camera.configure(resolution: settings.resolution)
@@ -60,9 +85,11 @@ final class LiveSession: ObservableObject {
             guard AppSettings.hasSource else { status = "Pick a source face first (Source tab)."; return }
             status = "Loading models (first launch compiles them for the Neural Engine; this can take a minute)..."
             let useCoreML = settings.useCoreML, cache = models.coreMLCacheDir, every = settings.detectEvery
+            let fast = settings.preferFastModel ? models.fastModel : nil, target = settings.computeTarget
             do {
                 let eng = try await Task.detached(priority: .userInitiated) { () throws -> LocalSwapEngine in
-                    let e = try LocalSwapEngine(models: paths, useCoreML: useCoreML, cacheDir: cache)
+                    let e = try LocalSwapEngine(models: paths, fast: fast, useCoreML: useCoreML,
+                                                target: target, cacheDir: cache)
                     e.detectEvery = every
                     guard let src = CIImage(contentsOf: AppSettings.sourceURL) else {
                         throw LocalSwapEngine.EngineError.noSourceFace
@@ -99,6 +126,8 @@ final class LiveSession: ObservableObject {
         camera.stop()
         camera.onFrame = nil
         camera.videoQueue.sync { activeEngine = nil }
+        swapQueue.sync {}                 // let an in-flight swap finish before releasing the engine
+        resultLock.withLock { latestSwap = nil }
         engine = nil
         client.disconnect()
         statsTimer?.invalidate()
@@ -156,25 +185,96 @@ final class LiveSession: ObservableObject {
         switch mode {
         case .onDevice:
             guard let eng = activeEngine else { return }
-            var timing = LocalSwapEngine.Timing()
-            let t0 = CFAbsoluteTimeGetCurrent()
-            var out = frame
-            do {
-                out = try eng.process(frame, timing: &timing).0
-            } catch {
-                if processErrors.shouldLog() {
-                    Log.error("Frame processing failed (#\(processErrors.total)): \(error)", "live")
-                }
+            // Vision box every frame: follows the face between detections and
+            // between swaps (a few ms on the Neural Engine).
+            let track = tracker.box(in: frame)
+            trackMisses = track == nil ? trackMisses + 1 : 0
+            if smooth {
+                handleSmooth(frame, track: track, engine: eng, now: now)
+            } else {
+                handleInline(frame, track: track, engine: eng)
             }
-            let ms = (CFAbsoluteTimeGetCurrent() - t0) * 1000
-            stats.add(ms: ms)
-            renderer.display(out)
-            let text = String(format: "detect %.0f · swap %.0f · paste %.0f ms", timing.detectMs, timing.swapMs, timing.compositeMs)
-            Task { @MainActor [weak self] in self?.stageText = text; self?.latencyMs = ms }
         case .pc:
             guard let jpeg = ops.jpeg(frame, quality: jpegQuality, maxSide: 960) else { return }
             _ = client.trySendFrame(jpeg: jpeg)
         }
+    }
+
+    /// Wait for every swap: display rate = swap rate.
+    private func handleInline(_ frame: CIImage, track: Box?, engine eng: LocalSwapEngine) {
+        var timing = LocalSwapEngine.Timing()
+        let t0 = CFAbsoluteTimeGetCurrent()
+        var out = frame
+        do {
+            if let r = try eng.swap(frame, track: track, timing: &timing) {
+                let t2 = CFAbsoluteTimeGetCurrent()
+                out = ops.paste(fake: r.fake, onto: frame, transform: r.transform, size: 128)
+                timing.compositeMs = (CFAbsoluteTimeGetCurrent() - t2) * 1000
+            }
+        } catch {
+            if processErrors.shouldLog() {
+                Log.error("Frame processing failed (#\(processErrors.total)): \(error)", "live")
+            }
+        }
+        let ms = (CFAbsoluteTimeGetCurrent() - t0) * 1000
+        stats.add(ms: ms)
+        renderer.display(out)
+        let text = String(format: "detect %.0f · swap %.0f · paste %.0f · track %.0f ms",
+                          timing.detectMs, timing.swapMs, timing.compositeMs, tracker.lastMs)
+        Task { @MainActor [weak self] in self?.stageText = text; self?.latencyMs = ms }
+    }
+
+    /// Show every camera frame; swap on a separate queue whenever it is free,
+    /// and paste the newest swapped face where the tracker says the head is now.
+    private func handleSmooth(_ frame: CIImage, track: Box?, engine eng: LocalSwapEngine, now: CFAbsoluteTime) {
+        if !swapBusy {
+            swapBusy = true
+            let started = now
+            swapQueue.async { [weak self] in
+                var timing = LocalSwapEngine.Timing()
+                var result: LocalSwapEngine.SwapResult?
+                var failed = false
+                do { result = try eng.swap(frame, track: track, timing: &timing) } catch {
+                    failed = true
+                    if let self = self, self.processErrors.shouldLog() {
+                        Log.error("Swap failed (#\(self.processErrors.total)): \(error)", "live")
+                    }
+                }
+                guard let self = self else { return }
+                if !failed { self.resultLock.withLock { self.latestSwap = result } }   // nil = no face now
+                let done = CFAbsoluteTimeGetCurrent()
+                self.camera.videoQueue.async {
+                    self.swapBusy = false
+                    if self.lastSwapDone > 0 { self.swapStats.add(ms: (done - self.lastSwapDone) * 1000) }
+                    self.lastSwapDone = done
+                    self.lastSwapText = String(format: "swap %.1f/s · detect %.0f · swap %.0f · age %.0f ms",
+                                               self.swapStats.avgFPS, timing.detectMs, timing.swapMs,
+                                               (done - started) * 1000)
+                }
+            }
+        }
+
+        let t0 = CFAbsoluteTimeGetCurrent()
+        var out = frame
+        if let r = resultLock.withLock({ latestSwap }), now - r.time < 0.75 {
+            var m = r.transform
+            var show = true
+            if let old = r.track {
+                if let cur = track {
+                    m = FaceTrack.retarget(m, from: old, to: cur)
+                } else if trackMisses > 3 {
+                    show = false      // tracker lost the face: don't leave a floating mask
+                }
+            }
+            if show { out = ops.paste(fake: r.fake, onto: frame, transform: m, size: 128) }
+        }
+        renderer.display(out)
+        let pasteMs = (CFAbsoluteTimeGetCurrent() - t0) * 1000
+        if lastFrameTime > 0 { stats.add(ms: (now - lastFrameTime) * 1000) }   // display interval -> FPS
+        lastFrameTime = now
+        let text = lastSwapText + String(format: " · track %.0f · paste %.0f ms", tracker.lastMs, pasteMs)
+        let lat = (CFAbsoluteTimeGetCurrent() - now) * 1000
+        Task { @MainActor [weak self] in self?.stageText = text; self?.latencyMs = lat }
     }
 
     // MARK: stats / thermal
@@ -201,7 +301,8 @@ final class LiveSession: ObservableObject {
             Log.info("Thermal state \(raw) -> maxFPS \(p.maxFPS), detectEvery \(p.detectEvery), paused \(p.paused)", "thermal")
             self.camera.videoQueue.async {
                 self.policy = p
-                self.activeEngine?.detectEvery = p.detectEvery
+                guard let eng = self.activeEngine else { return }
+                if self.smooth { self.swapQueue.async { eng.detectEvery = p.detectEvery } } else { eng.detectEvery = p.detectEvery }
             }
             Task { @MainActor in
                 self.thermalText = ["nominal", "fair", "serious", "critical"][min(raw, 3)]

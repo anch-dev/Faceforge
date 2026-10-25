@@ -69,3 +69,38 @@ public enum Tensor {
         return dot / (sqrt(na) * sqrt(nb))
     }
 }
+
+public extension Tensor {
+    /// Element count if `strides` describe a dense row-major layout of `shape`
+    /// (so the buffer can be copied in one go), else nil.
+    static func contiguousCount(shape: [Int], strides: [Int]) -> Int? {
+        guard shape.count == strides.count else { return nil }
+        var expected = 1
+        for i in stride(from: shape.count - 1, through: 0, by: -1) {
+            if shape[i] != 1 && strides[i] != expected { return nil }
+            expected *= shape[i]
+        }
+        return expected
+    }
+
+    /// Row-major copy of a strided tensor; `read(offset)` returns the element
+    /// at a storage offset (e.g. an MLMultiArray with padded rows).
+    static func gather(shape: [Int], strides: [Int], read: (Int) -> Float) -> [Float] {
+        let count = shape.reduce(1, *)
+        var out = [Float](repeating: 0, count: count)
+        var idx = [Int](repeating: 0, count: shape.count)
+        for n in 0..<count {
+            var off = 0
+            for k in 0..<shape.count { off += idx[k] * strides[k] }
+            out[n] = read(off)
+            var k = shape.count - 1
+            while k >= 0 {
+                idx[k] += 1
+                if idx[k] < shape[k] { break }
+                idx[k] = 0
+                k -= 1
+            }
+        }
+        return out
+    }
+}

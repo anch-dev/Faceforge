@@ -1,5 +1,22 @@
 import SwiftUI
 
+/// Where Core ML may run the swap model. The Neural Engine only runs fp16
+/// models; "GPU" is Metal.
+enum ComputeTarget: String, CaseIterable, Identifiable {
+    case neuralEngine = "Neural Engine"
+    case all = "All (Neural Engine + GPU + CPU)"
+    case gpu = "GPU (Metal)"
+    var id: String { rawValue }
+    /// ONNX Runtime Core ML EP `MLComputeUnits` value.
+    var ortValue: String {
+        switch self {
+        case .neuralEngine: return "CPUAndNeuralEngine"
+        case .all: return "ALL"
+        case .gpu: return "CPUAndGPU"
+        }
+    }
+}
+
 enum ProcessingMode: String, CaseIterable, Identifiable {
     case onDevice = "On iPhone"
     case pc = "PC offload"
@@ -20,6 +37,11 @@ final class AppSettings: ObservableObject {
     @Published var jpegQuality: Double { didSet { Self.d.set(jpegQuality, forKey: "jpegQuality") } }
     @Published var showStats: Bool { didSet { Self.d.set(showStats, forKey: "showStats") } }
     @Published var acceptedModelLicense: Bool { didSet { Self.d.set(acceptedModelLicense, forKey: "acceptedModelLicense") } }
+    @Published var computeTarget: ComputeTarget { didSet { Self.d.set(computeTarget.rawValue, forKey: "computeTarget") } }
+    /// Show camera frames at full rate and glue the latest swapped face onto
+    /// the tracked head, instead of waiting for every swap.
+    @Published var smoothPreview: Bool { didSet { Self.d.set(smoothPreview, forKey: "smoothPreview") } }
+    @Published var preferFastModel: Bool { didSet { Self.d.set(preferFastModel, forKey: "preferFastModel") } }
 
     init() {
         let d = Self.d
@@ -33,6 +55,9 @@ final class AppSettings: ObservableObject {
         jpegQuality = d.object(forKey: "jpegQuality") as? Double ?? 0.75
         showStats = d.object(forKey: "showStats") as? Bool ?? true
         acceptedModelLicense = d.bool(forKey: "acceptedModelLicense")
+        computeTarget = ComputeTarget(rawValue: d.string(forKey: "computeTarget") ?? "") ?? .neuralEngine
+        smoothPreview = d.object(forKey: "smoothPreview") as? Bool ?? true
+        preferFastModel = d.object(forKey: "preferFastModel") as? Bool ?? true
     }
 
     /// The source identity photo, stored locally as JPEG.

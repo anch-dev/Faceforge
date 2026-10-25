@@ -11,8 +11,8 @@ settings:
   base:
     SWIFT_VERSION: "5.0"
     SWIFT_STRICT_CONCURRENCY: minimal
-    MARKETING_VERSION: "0.1.2"
-    CURRENT_PROJECT_VERSION: "3"
+    MARKETING_VERSION: "0.1.3"
+    CURRENT_PROJECT_VERSION: "4"
     CODE_SIGN_STYLE: Manual
     DEVELOPMENT_TEAM: ""
 packages:
@@ -56,4 +56,8 @@ targets:
         NSCameraUsageDescription: "Faceforge uses the front camera for live face swapping. Frames stay on this iPhone, or go only to your own PC in PC offload mode."
         NSLocalNetworkUsageDescription: "Faceforge connects to the Faceforge server on your own PC to offload face swapping to its GPU."
         NSBonjourServices: [_faceforge._tcp]
+        # Plain HTTP only to local-network hosts: the fast-model hand-off from
+        # Send-Model-To-iPhone.bat on the user's own PC. Internet stays HTTPS-only.
+        NSAppTransportSecurity:
+          NSAllowsLocalNetworking: true
         NSPhotoLibraryAddUsageDescription: "Faceforge saves swapped photos to your library when you tap Save."
