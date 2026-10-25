@@ -77,7 +77,11 @@ public enum FaceAlign {
             precondition(size % 128 == 0, "unsupported crop size \(size)")
             ratio = Double(size) / 128.0; diffX = 8.0 * ratio
         }
-        let dst = arcfaceDst.map { Point2(x: $0.x * ratio + diffX, y: $0.y * ratio) }
-        return similarity(from: kps, to: dst)
+        // Mirror the reference's float32 arithmetic (insightface keeps the
+        // template and landmarks in float32), so results match to ~1e-9 px.
+        let r = Float(ratio), dx = Float(diffX)
+        let dst = arcfaceDst.map { Point2(x: Double(Float($0.x) * r + dx), y: Double(Float($0.y) * r)) }
+        let src = kps.map { Point2(x: Double(Float($0.x)), y: Double(Float($0.y))) }
+        return similarity(from: src, to: dst)
     }
 }
