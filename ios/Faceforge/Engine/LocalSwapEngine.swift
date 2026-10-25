@@ -14,7 +14,9 @@ final class LocalSwapEngine {
     struct Timing { var detectMs = 0.0, swapMs = 0.0, compositeMs = 0.0 }
 
     private let env: ORTEnv
-    private let detector: ORTSession
+    private var detector: ORTSession
+    private var detectorOnCoreML = false
+    private let detectorPath: URL
     private let recognizer: ORTSession
     private let swapper: ORTSession
     private let detInput: String, detOutputs: [String]
@@ -75,10 +77,11 @@ final class LocalSwapEngine {
         }
 
         try FileManager.default.createDirectory(at: cacheDir, withIntermediateDirectories: true)
-        // Detector stays on CPU: det_10g declares output shapes for 640 px input,
-        // and Core ML rejects the real 320 px shapes ("Invalid shape for output
-        // feature '_448'", seen on iPhone 16 Pro Max). ORT's CPU path accepts them.
-        let det = try makeSession(models.detector, coreML: false).0
+        // Detector: Core ML (Neural Engine/GPU) at 640 px, the input size det_10g's
+        // declared output shapes assume. At 320 px Core ML rejected the outputs
+        // ("Invalid shape for output feature '_448'", iPhone 16 Pro Max), so if
+        // Core ML fails at run time detect() falls back to CPU at 320 px.
+        let (det, detOnCoreML) = try makeSession(models.detector, coreML: useCoreML)
         let rec = try makeSession(models.recognizer, coreML: false).0
         let (sw, coreMLActive) = try makeSession(models.swapper, coreML: useCoreML)
 
@@ -90,6 +93,7 @@ final class LocalSwapEngine {
         let swapInputs = try sw.inputNames()
         let swapOut = try sw.outputNames()[0]
         detector = det
+        detectorPath = models.detector
         recognizer = rec
         swapper = sw
         detInput = detIn
@@ -107,12 +111,28 @@ final class LocalSwapEngine {
                   + "swapper in=\(swapInputs) out=\(swapOut) · emap \(em.dims)", "engine")
 
         backendSummary = "ONNX Runtime \(ORTVersion() ?? "?") · " + (coreMLActive ? "Core ML (Neural Engine/GPU)" : "CPU")
-        Log.info("Backend: \(backendSummary)", "engine")
+        detectorOnCoreML = detOnCoreML
+        detSize = detOnCoreML ? 640 : 320
+        Log.info("Backend: \(backendSummary) · detector \(detOnCoreML ? "Core ML" : "CPU") @ \(detSize) px", "engine")
     }
 
     // MARK: - stages
 
     func detect(_ frame: CIImage) throws -> [DetectedFace] {
+        do {
+            return try detectOnce(frame)
+        } catch where detectorOnCoreML {
+            Log.warn("Detector on Core ML failed (\(error.localizedDescription)); switching to CPU @ 320 px", "engine")
+            let o = try ORTSessionOptions()
+            try o.setGraphOptimizationLevel(.all)
+            detector = try ORTSession(env: env, modelPath: detectorPath.path, sessionOptions: o)
+            detectorOnCoreML = false
+            detSize = 320
+            return try detectOnce(frame)
+        }
+    }
+
+    private func detectOnce(_ frame: CIImage) throws -> [DetectedFace] {
         let (tensor, scale) = try ops.detectorTensor(frame: frame, size: detSize)
         let out = try run(detector, [detInput: (tensor, [1, 3, detSize, detSize])], outputs: detOutputs)
         return SCRFD.decode(outputs: detOutputs.map { out[$0]! }, inputSize: detSize, detScale: scale)
