@@ -1,4 +1,5 @@
 name: Upstream drift check
+# Registered on the default branch so it can be started from the Actions tab.
 
 # Daily: do the Faceforge patches still apply to the latest public upstream?
 # Reports only. Never builds or releases; moving patches/UPSTREAM.lock forward

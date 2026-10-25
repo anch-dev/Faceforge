@@ -1,4 +1,5 @@
 name: Build Faceforge (Windows)
+# Registered on the default branch so it can be started from the Actions tab.
 
 # Manual only. Releases are created as DRAFTS unless "publish" is ticked, so
 # nothing becomes public without a person approving it.
