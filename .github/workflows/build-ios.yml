@@ -29,7 +29,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: FaceforgeCore unit tests (golden fixtures)
-        run: swift test --package-path ios/FaceforgeCore
+        run: |
+          set +e
+          swift test --package-path ios/FaceforgeCore > swift-test.log 2>&1
+          rc=$?
+          tail -40 swift-test.log
+          if [ "$rc" -ne 0 ]; then bash ios/ci/annotate.sh swift-test.log "FaceforgeCore tests"; fi
+          exit "$rc"
 
   build:
     needs: core-tests
@@ -68,6 +74,7 @@ jobs:
           done
           echo "ONNX Runtime for iOS: $USED"
           echo "version=$USED" >> "$GITHUB_OUTPUT"
+          echo "::notice title=ONNX Runtime for iOS::$USED"
           echo "ONNX Runtime for iOS: **$USED**" >> "$GITHUB_STEP_SUMMARY"
           case "$USED" in 1.24.2*) echo "::warning::Using ORT 1.24.2: inswapper's Pad ops will run on CPU (slower).";; esac
 
@@ -87,7 +94,7 @@ jobs:
           rc=$?
           set -e
           grep -E "error:|BUILD (SUCCEEDED|FAILED)" xcodebuild.log | head -60 || true
-          if [ "$rc" -ne 0 ]; then tail -80 xcodebuild.log; fi
+          if [ "$rc" -ne 0 ]; then tail -80 xcodebuild.log; bash ci/annotate.sh xcodebuild.log "Xcode build"; fi
           exit "$rc"
 
       - name: Upload build log on failure
