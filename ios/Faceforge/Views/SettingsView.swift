@@ -6,6 +6,8 @@ struct SettingsView: View {
     @ObservedObject var settings: AppSettings
     @ObservedObject var live: LiveSession
     @StateObject private var browser = ServerBrowser()
+    @State private var verbose = Log.verbose
+    @State private var logFiles: [URL] = Log.files()
 
     var body: some View {
         NavigationStack {
@@ -39,15 +41,36 @@ struct SettingsView: View {
                     Slider(value: $settings.jpegQuality, in: 0.4...0.95) { Text("PC image quality") }
                     Toggle("Show stats", isOn: $settings.showStats)
                 }
+                Section {
+                    Toggle("Verbose logging", isOn: $verbose)
+                        .onChange(of: verbose) { _, v in
+                            Log.verbose = v
+                            Log.info("Verbose logging \(v ? "ON" : "OFF") (ONNX Runtime level applies from next Live start)")
+                        }
+                    if let latest = logFiles.first {
+                        ShareLink(item: latest) { Label("Share current log", systemImage: "square.and.arrow.up") }
+                        Text("\(latest.lastPathComponent) · \(sizeText(latest))").font(.caption).foregroundStyle(.secondary)
+                    }
+                    Button("Delete older logs", role: .destructive) { Log.clearOld(); logFiles = Log.files() }
+                } header: {
+                    Text("Logs")
+                } footer: {
+                    Text("Also in the Files app: On My iPhone > Faceforge > Logs. One file per launch; the newest 10 are kept.")
+                }
                 Section("About") {
                     Text("Faceforge is for personal use. Only use faces you have permission to use, and label anything you share as a deepfake.")
                         .font(.footnote)
                 }
             }
             .navigationTitle("Settings")
-            .onAppear { browser.start() }
+            .onAppear { browser.start(); logFiles = Log.files() }
             .onDisappear { browser.stop() }
         }
+    }
+
+    private func sizeText(_ url: URL) -> String {
+        let size = (try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
+        return ByteCountFormatter.string(fromByteCount: Int64(size), countStyle: .file)
     }
 
     /// Resolve a Bonjour service to host:port and store it.

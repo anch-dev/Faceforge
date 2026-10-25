@@ -69,6 +69,7 @@ final class OffloadClient {
             send(OffloadProtocol.encodeJSON(.hello, ["protocol": OffloadProtocol.version, "token": token, "client": "ios"]))
             receive()
         case .failed(let e):
+            Log.error("Connection failed: \(e)", "offload")
             state = .failed(e.localizedDescription)
         case .waiting(let e):
             state = .failed("Waiting for network: \(e.localizedDescription)")
@@ -110,6 +111,7 @@ final class OffloadClient {
             onSourceAck?(j["ok"] as? Bool ?? false, j["message"] as? String ?? "")
         case .error:
             let j = (try? OffloadProtocol.parseJSON(m.payload)) ?? [:]
+            Log.error("Server error: \(j)", "offload")
             state = .failed(j["message"] as? String ?? "Server error")
             disconnectLocked()
         default:

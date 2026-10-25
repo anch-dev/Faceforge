@@ -35,6 +35,8 @@ def test_project_declares_required_privacy_keys():
                 "NSPhotoLibraryAddUsageDescription"):
         assert props.get(key), key
     assert "_faceforge._tcp" in props["NSBonjourServices"]
+    # Logs/ in Documents must be reachable from the Files app.
+    assert props.get("UIFileSharingEnabled") is True and props.get("LSSupportsOpeningDocumentsInPlace") is True
 
 
 def test_app_never_bundles_weights():

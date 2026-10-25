@@ -79,8 +79,10 @@ struct PhotoSwapView: View {
             let ctx = CIContext()
             if let cg = ctx.createCGImage(out, from: out.extent) { result = UIImage(cgImage: cg) }
             message += String(format: (message.isEmpty ? "" : " ") + "Done in %.1f s.", CFAbsoluteTimeGetCurrent() - t0)
+            Log.info("Photo swap (\(settings.mode.rawValue)): \(message)", "photo")
         } catch {
             message = error.localizedDescription
+            Log.error("Photo swap failed (\(settings.mode.rawValue)): \(error)", "photo")
         }
     }
 }

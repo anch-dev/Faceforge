@@ -29,6 +29,8 @@ final class LiveSession: ObservableObject {
     private var mode = ProcessingMode.onDevice
     private var jpegQuality = 0.75
     private var activeEngine: LocalSwapEngine?
+    private let processErrors = ErrorThrottle()
+    private var lastStatsLog = 0.0
     private var thermalObserver: NSObjectProtocol?
     private var statsTimer: Timer?
 
@@ -41,11 +43,14 @@ final class LiveSession: ObservableObject {
         }
         mode = settings.mode
         jpegQuality = settings.jpegQuality
+        Log.info("Live start: mode=\(settings.mode.rawValue) camera=\(settings.resolution.rawValue) "
+                 + "detectEvery=\(settings.detectEvery) coreML=\(settings.useCoreML) jpegQ=\(settings.jpegQuality)", "live")
         stats.reset()
         do {
             try camera.configure(resolution: settings.resolution)
         } catch {
             status = error.localizedDescription
+            Log.error("Camera configure failed: \(error.localizedDescription)", "live")
             return
         }
 
@@ -70,6 +75,7 @@ final class LiveSession: ObservableObject {
                 camera.videoQueue.sync { activeEngine = eng }
             } catch {
                 status = "Could not start: \(error.localizedDescription)"
+                Log.error("Engine start failed: \(error)", "live")
                 return
             }
         case .pc:
@@ -99,6 +105,7 @@ final class LiveSession: ObservableObject {
         if let o = thermalObserver { NotificationCenter.default.removeObserver(o) }
         running = false
         status = "Stopped"
+        Log.info("Live stop", "live")
     }
 
     /// Connect using a typed host or a Bonjour-discovered endpoint.
@@ -111,17 +118,21 @@ final class LiveSession: ObservableObject {
                 guard let self = self else { return }
                 switch s {
                 case .connecting: self.status = "Connecting to PC..."
+                    Log.info("PC: connecting to \(ep)", "offload")
                 case .connected(let provider, let device):
+                    Log.info("PC: connected · provider \(provider) \(device)", "offload")
                     self.status = "Connected to PC"
                     self.backend = "PC: \(provider.replacingOccurrences(of: "ExecutionProvider", with: "")) \(device)"
                     if let src = try? Data(contentsOf: AppSettings.sourceURL) { self.client.sendSource(jpeg: src) }
                     self.client.sendSettings(["detect_every": detectEvery])
                 case .failed(let msg): self.status = "PC: \(msg)"
+                    Log.error("PC: \(msg)", "offload")
                 case .idle: break
                 }
             }
         }
         client.onSourceAck = { [weak self] ok, msg in
+            Log.info("PC: source ack ok=\(ok) \(msg)", "offload")
             Task { @MainActor in if !ok { self?.status = "PC: \(msg)" } }
         }
         client.onResult = { [weak self] result, rtt in
@@ -147,7 +158,14 @@ final class LiveSession: ObservableObject {
             guard let eng = activeEngine else { return }
             var timing = LocalSwapEngine.Timing()
             let t0 = CFAbsoluteTimeGetCurrent()
-            let out = (try? eng.process(frame, timing: &timing))?.0 ?? frame
+            var out = frame
+            do {
+                out = try eng.process(frame, timing: &timing).0
+            } catch {
+                if processErrors.shouldLog() {
+                    Log.error("Frame processing failed (#\(processErrors.total)): \(error)", "live")
+                }
+            }
             let ms = (CFAbsoluteTimeGetCurrent() - t0) * 1000
             stats.add(ms: ms)
             renderer.display(out)
@@ -163,9 +181,15 @@ final class LiveSession: ObservableObject {
 
     @MainActor
     private func publishStats() {
-        let (f, low) = camera.videoQueue.sync { (stats.avgFPS, stats.onePercentLowFPS) }
+        let (f, low, p95) = camera.videoQueue.sync { (stats.avgFPS, stats.onePercentLowFPS, stats.percentile(95)) }
         fps = f
         onePctLow = low
+        let now = CFAbsoluteTimeGetCurrent()
+        if Log.verbose, now - lastStatsLog >= 1 {
+            lastStatsLog = now
+            Log.debug(String(format: "fps %.1f · 1%%low %.1f · p95 %.0f ms · last %.0f ms · %@ · thermal %@",
+                             f, low, p95, latencyMs, stageText, thermalText), "perf")
+        }
     }
 
     @MainActor
@@ -174,6 +198,7 @@ final class LiveSession: ObservableObject {
             guard let self = self else { return }
             let raw = ProcessInfo.processInfo.thermalState.rawValue
             let p = ThermalPolicy.forState(raw, userDetectEvery: userDetectEvery)
+            Log.info("Thermal state \(raw) -> maxFPS \(p.maxFPS), detectEvery \(p.detectEvery), paused \(p.paused)", "thermal")
             self.camera.videoQueue.async {
                 self.policy = p
                 self.activeEngine?.detectEvery = p.detectEvery

@@ -31,7 +31,10 @@ final class LocalSwapEngine {
     private(set) var sourceLatent: [Float]?
 
     init(models: ModelStore.Paths, useCoreML: Bool, cacheDir: URL) throws {
-        let env = try ORTEnv(loggingLevel: .warning)
+        // Info level shows ORT's Core ML partitioning (how many nodes run on the
+        // Neural Engine vs CPU) in the log file.
+        let env = try ORTEnv(loggingLevel: Log.verbose ? .info : .warning)
+        Log.info("ONNX Runtime \(ORTVersion() ?? "?") · Core ML EP available: \(ORTIsCoreMLExecutionProviderAvailable())", "engine")
         self.env = env
 
         /// Try Core ML with a persistent compiled-model cache (avoids re-compiling
@@ -49,9 +52,12 @@ final class LocalSwapEngine {
             attempts.append(nil)  // CPU (XNNPACK-accelerated when available)
             var lastError: Error?
             for cfg in attempts {
+                let label = cfg == nil ? "CPU/XNNPACK" : (cfg?["ModelCacheDirectory"] != nil ? "CoreML+cache" : "CoreML")
+                let t0 = CFAbsoluteTimeGetCurrent()
                 do {
                     let o = try ORTSessionOptions()
                     try o.setGraphOptimizationLevel(.all)
+                    try? o.setLogSeverityLevel(Log.verbose ? .info : .warning)
                     if let cfg = cfg {
                         try o.appendCoreMLExecutionProvider(withOptionsV2: cfg)
                     } else {
@@ -59,8 +65,12 @@ final class LocalSwapEngine {
                         xnn.intra_op_num_threads = 4
                         try? o.appendXnnpackExecutionProvider(with: xnn)
                     }
-                    return (try ORTSession(env: env, modelPath: path.path, sessionOptions: o), cfg != nil)
+                    let session = try ORTSession(env: env, modelPath: path.path, sessionOptions: o)
+                    Log.info("\(path.lastPathComponent): session ready on \(label) in "
+                             + String(format: "%.1f s", CFAbsoluteTimeGetCurrent() - t0), "engine")
+                    return (session, cfg != nil)
                 } catch {
+                    Log.warn("\(path.lastPathComponent): \(label) failed: \(error.localizedDescription)", "engine")
                     lastError = error
                 }
             }
@@ -96,8 +106,11 @@ final class LocalSwapEngine {
         let em = try OnnxInitializerReader.lastInitializer(fileURL: models.swapper)
         guard em.dims == [512, 512] else { throw EngineError.badEmap(em.dims) }
         emap = em.floats
+        Log.debug("detector in=\(detIn) out=\(detOuts) · recognizer in=\(recIn) out=\(recOut) · "
+                  + "swapper in=\(swapInputs) out=\(swapOut) · emap \(em.dims)", "engine")
 
         backendSummary = "ONNX Runtime \(ORTVersion() ?? "?") · " + (coreMLActive ? "Core ML (Neural Engine/GPU)" : "CPU")
+        Log.info("Backend: \(backendSummary)", "engine")
     }
 
     // MARK: - stages
@@ -118,6 +131,7 @@ final class LocalSwapEngine {
     @discardableResult
     func setSource(_ image: CIImage) throws -> Int {
         let faces = try detect(image)
+        Log.info("Source image \(Int(image.extent.width))x\(Int(image.extent.height)): \(faces.count) face(s)", "engine")
         guard let best = faces.max(by: { $0.area < $1.area }) else { throw EngineError.noSourceFace }
         sourceLatent = Tensor.inswapperLatent(embedding: try embed(image, face: best), emap: emap)
         cachedFace = nil

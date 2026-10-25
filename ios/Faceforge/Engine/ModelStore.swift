@@ -66,8 +66,10 @@ final class ModelStore: NSObject, ObservableObject {
                 try? FileManager.default.removeItem(at: zip)
             }
             state = paths != nil ? .ready : .failed("Models incomplete after download.")
+            Log.info("Models ready: \(paths != nil)", "models")
         } catch {
             state = .failed(error.localizedDescription)
+            Log.error("Model download failed: \(error)", "models")
         }
     }
 
@@ -80,6 +82,9 @@ final class ModelStore: NSObject, ObservableObject {
 
     private func fetch(_ asset: ModelCatalog.Asset, to dest: URL, label: String) async throws {
         state = .downloading(label, 0)
+        Log.info("Download start: \(asset.url.absoluteString) (\(asset.size) bytes)", "models")
+        var lastDecile = -1
+        let t0 = CFAbsoluteTimeGetCurrent()
         let tmp: URL = try await withCheckedThrowingContinuation { cont in
             let task = URLSession.shared.downloadTask(with: asset.url) { url, response, error in
                 if let error = error { cont.resume(throwing: error); return }
@@ -93,15 +98,19 @@ final class ModelStore: NSObject, ObservableObject {
             }
             observation = task.progress.observe(\.fractionCompleted) { [weak self] p, _ in
                 let f = p.fractionCompleted
+                let decile = Int(f * 10)
+                if decile != lastDecile { lastDecile = decile; Log.debug("\(asset.name): \(decile * 10)%", "models") }
                 Task { @MainActor in self?.state = .downloading(label, f) }
             }
             task.resume()
         }
         observation = nil
+        Log.info(String(format: "Downloaded %@ in %.0f s; verifying SHA-256", asset.name, CFAbsoluteTimeGetCurrent() - t0), "models")
         state = .verifying(label)
         let ok = try await Task.detached(priority: .userInitiated) {
             try ModelStore.verify(tmp, size: asset.size, sha256: asset.sha256)
         }.value
+        Log.info("\(asset.name) integrity: \(ok ? "OK" : "MISMATCH")", "models")
         guard ok else {
             try? FileManager.default.removeItem(at: tmp)
             throw StoreError.checksum(asset.name)
