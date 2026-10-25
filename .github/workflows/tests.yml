@@ -1,0 +1,35 @@
+name: Tests
+
+on:
+  push:
+  pull_request:
+  workflow_call:
+
+jobs:
+  unit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install test dependencies
+        run: pip install -r requirements-dev.txt
+
+      - name: Clone pinned upstream for patch tests
+        run: |
+          SHA=$(sed -n 's/^commit=//p' patches/UPSTREAM.lock)
+          git clone https://github.com/hacksider/Deep-Live-Cam.git "$RUNNER_TEMP/upstream"
+          git -C "$RUNNER_TEMP/upstream" checkout "$SHA"
+
+      - name: Unit tests
+        env:
+          FACEFORGE_UPSTREAM: ${{ runner.temp }}/upstream
+        run: python -m pytest -q
+
+      - name: Lint workflows
+        run: |
+          bash <(curl -sSfL https://raw.githubusercontent.com/rhysd/actionlint/v1.7.7/scripts/download-actionlint.bash) 1.7.7
+          ./actionlint -shellcheck=

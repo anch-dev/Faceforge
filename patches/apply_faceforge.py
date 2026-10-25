@@ -1,155 +1,190 @@
 """Faceforge patches applied on top of upstream Deep-Live-Cam at build time.
 
-Usage:  python apply_faceforge.py <path-to-upstream-checkout>
+Usage:
+    python apply_faceforge.py <upstream-checkout>           apply
+    python apply_faceforge.py <upstream-checkout> --check   report only, write nothing
 
-Every patch is an exact text replacement. If upstream changes the code a
-patch targets, the script exits non-zero so the build fails loudly instead
-of silently shipping an unpatched (slow) app.
+Every patch is an exact text replacement. If upstream changes the code a patch
+targets, the script exits non-zero so the build fails loudly instead of
+silently shipping an unpatched app. Re-running is safe (already-applied
+patches are skipped).
+
+Tested against the upstream commit recorded in patches/UPSTREAM.lock.
 """
 from __future__ import annotations
 
 import pathlib
+import shutil
 import sys
 
-ROOT = pathlib.Path(sys.argv[1] if len(sys.argv) > 1 else ".").resolve()
-failures: list[str] = []
+HERE = pathlib.Path(__file__).resolve().parent
 
 
-def patch(rel: str, old: str, new: str, label: str) -> None:
-    path = ROOT / rel
-    text = path.read_text(encoding="utf-8")
-    if new in text:
-        print(f"[skip] {label} (already applied)")
-        return
-    count = text.count(old)
-    if count != 1:
-        failures.append(f"{label}: expected 1 match in {rel}, found {count}")
-        print(f"[FAIL] {label}")
-        return
-    path.write_text(text.replace(old, new), encoding="utf-8")
-    print(f"[ok]   {label}")
+class Patcher:
+    def __init__(self, root: pathlib.Path, check_only: bool = False):
+        self.root = root
+        self.check_only = check_only
+        self.failures: list[str] = []
+        self.applied: list[str] = []
+        self.skipped: list[str] = []
+
+    def replace(self, rel: str, old: str, new: str, label: str) -> None:
+        path = self.root / rel
+        if not path.exists():
+            self.failures.append(f"{label}: {rel} does not exist")
+            print(f"[FAIL] {label} (missing file)")
+            return
+        text = path.read_text(encoding="utf-8")
+        if new in text:
+            self.skipped.append(label)
+            print(f"[skip] {label} (already applied)")
+            return
+        count = text.count(old)
+        if count != 1:
+            self.failures.append(f"{label}: expected 1 match in {rel}, found {count}")
+            print(f"[FAIL] {label}")
+            return
+        if not self.check_only:
+            path.write_text(text.replace(old, new), encoding="utf-8")
+        self.applied.append(label)
+        print(f"[ok]   {label}")
+
+    def copy(self, src: pathlib.Path, rel: str, label: str) -> None:
+        dst = self.root / rel
+        if dst.exists() and dst.read_bytes() == src.read_bytes():
+            self.skipped.append(label)
+            print(f"[skip] {label} (already applied)")
+            return
+        if not dst.parent.exists():
+            self.failures.append(f"{label}: target folder {dst.parent} missing")
+            print(f"[FAIL] {label}")
+            return
+        if not self.check_only:
+            shutil.copyfile(src, dst)
+        self.applied.append(label)
+        print(f"[ok]   {label}")
 
 
-# 1. Frozen-app exit: quit() is a site builtin that doesn't exist under PyInstaller.
-patch(
-    "modules/core.py",
-    "    if to_quit:\n        quit()",
-    "    if to_quit:\n        sys.exit()",
-    "core: sys.exit instead of quit()",
-)
+def apply_all(p: Patcher) -> None:
+    # 0. Faceforge helper module (licence notices, fp16 conversion, provider reports).
+    p.copy(HERE / "faceforge_runtime.py", "modules/faceforge_runtime.py", "add modules/faceforge_runtime.py")
 
-# 2. Live-friendly default detection size. 320 roughly quarters detection cost
-#    vs 640 and is plenty for a face filling a webcam frame. Still selectable
-#    in the UI (160/320/640); a saved UI choice overrides this default.
-patch(
-    "modules/globals.py",
-    "DEFAULT_DET_SIZE: int = 640",
-    "DEFAULT_DET_SIZE: int = 320  # Faceforge: 320 for live speed (was 640)",
-    "globals: default det_size 320",
-)
+    # 1. Frozen-app exit: quit() is a site builtin that doesn't exist under PyInstaller.
+    p.replace("modules/core.py",
+              "    if to_quit:\n        quit()",
+              "    if to_quit:\n        sys.exit()",
+              "core: sys.exit instead of quit()")
 
-# 3. Pick the fp16 swap model and CUDA graphs based on the ONNX Runtime
-#    provider actually in use, not on PyTorch being installed. Packaged
-#    builds ship without torch, so upstream silently fell back to the slow
-#    fp32 path and skipped CUDA graphs on every GPU.
-patch(
-    "modules/processors/frame/face_swapper.py",
-    "            use_fp16 = _HAS_TORCH_CUDA and os.path.exists(fp16_path)",
-    "            use_fp16 = _faceforge_prefers_fp16() and os.path.exists(fp16_path)",
-    "face_swapper: fp16 by provider",
-)
-patch(
-    "modules/processors/frame/face_swapper.py",
-    "    variants = [\"inswapper_128.onnx\", \"inswapper_128_fp16.onnx\"]\n    if _HAS_TORCH_CUDA:",
-    "    variants = [\"inswapper_128.onnx\", \"inswapper_128_fp16.onnx\"]\n    if _faceforge_prefers_fp16():",
-    "face_swapper: download fp16 first on GPU",
-)
-patch(
-    "modules/processors/frame/face_swapper.py",
-    "                if _HAS_TORCH_CUDA and any(\n",
-    "                if _faceforge_cuda_graphs_ok() and any(\n",
-    "face_swapper: CUDA graphs without torch",
-)
+    # 2. Live-friendly default detection size (still selectable in the UI;
+    #    a saved UI choice overrides it).
+    p.replace("modules/globals.py",
+              "DEFAULT_DET_SIZE: int = 640",
+              "DEFAULT_DET_SIZE: int = 320  # Faceforge: 320 for live speed (was 640)",
+              "globals: default det_size 320")
 
-# 4. Say loudly when a GPU was requested but ONNX Runtime fell back to CPU
-#    (the #1 cause of "it runs at 2 FPS": CUDA/cuDNN missing or mismatched).
-patch(
-    "modules/processors/frame/face_swapper.py",
-    "                update_status(\"Face swapper model loaded successfully.\", NAME)",
-    "                _faceforge_report_providers(FACE_SWAPPER)\n"
-    "                update_status(\"Face swapper model loaded successfully.\", NAME)",
-    "face_swapper: CPU fallback warning",
-)
-patch(
-    "modules/processors/frame/face_swapper.py",
-    "_HAS_TORCH_CUDA = False\ntry:\n    import torch\n",
-    '''_GPU_PROVIDERS = (
-    "CUDAExecutionProvider",
-    "DmlExecutionProvider",
-    "OpenVINOExecutionProvider",
-    "CoreMLExecutionProvider",
-    "ROCMExecutionProvider",
-)
+    # 3. fp16 swap model and CUDA graphs chosen by the ONNX Runtime provider in
+    #    use, not by PyTorch being installed (portable builds ship without torch,
+    #    so upstream silently took the slower fp32 path on every GPU). The fp16
+    #    file is derived locally from the publisher's fp32 file.
+    p.replace("modules/processors/frame/face_swapper.py",
+              "            use_fp16 = _HAS_TORCH_CUDA and os.path.exists(fp16_path)",
+              "            from modules import faceforge_runtime as _ffr\n"
+              "            use_fp16 = _ffr.prefers_fp16(modules.globals.execution_providers, _HAS_TORCH_CUDA) \\\n"
+              "                and _ffr.ensure_local_fp16(fp32_path, fp16_path, pre_check)",
+              "face_swapper: fp16 by provider, derived locally")
+    p.replace("modules/processors/frame/face_swapper.py",
+              "                if _HAS_TORCH_CUDA and any(\n",
+              "                if _ffr.cuda_graphs_ok(modules.globals.execution_providers) and any(\n",
+              "face_swapper: CUDA graphs without torch")
+
+    # 4. Report the provider each session really runs on; loud banner on CPU fallback.
+    p.replace("modules/processors/frame/face_swapper.py",
+              "                update_status(\"Face swapper model loaded successfully.\", NAME)",
+              "                _ffr.report_session(\"swap model\", FACE_SWAPPER.session,\n"
+              "                                    modules.globals.execution_providers,\n"
+              "                                    status=lambda m: update_status(m, NAME))\n"
+              "                update_status(\"Face swapper model loaded successfully.\", NAME)",
+              "face_swapper: provider report")
+    p.replace("modules/face_analyser.py",
+              "                _optimize_det_model(analyser, providers, det_size)\n",
+              "                _optimize_det_model(analyser, providers, det_size)\n"
+              "                from modules import faceforge_runtime as _ffr\n"
+              "                _ffr.report_face_analyser(analyser, modules.globals.execution_providers)\n",
+              "face_analyser: provider report")
+
+    # 5. Model sources: publisher URLs where they exist, never a third-party
+    #    fp16 inswapper copy, and a licence notice before every first download.
+    p.replace("modules/model_downloader.py",
+              "def resolve_url(name: str) -> str:\n",
+              "def resolve_url(name: str) -> str:\n"
+              "    from modules import faceforge_runtime as _ffr\n"
+              "    _publisher = _ffr.publisher_url(name)\n"
+              "    if _publisher:\n"
+              "        return _publisher\n",
+              "model_downloader: publisher URLs")
+    p.replace("modules/model_downloader.py",
+              "        if _download(name, resolve_url(name), target, expected_size(name)):\n",
+              "        from modules import faceforge_runtime as _ffr\n"
+              "        if not _ffr.download_allowed(name):\n"
+              "            return None\n"
+              "        _ffr.license_notice(name, resolve_url(name))\n"
+              "        if _download(name, resolve_url(name), target, expected_size(name)):\n",
+              "model_downloader: licence notice + blocked mirrors")
+    p.replace("modules/model_downloader.py",
+              "    members = [n for n in MODEL_SIZES if n.startswith(f\"{name}/\")]\n",
+              "    # Faceforge: when the pack is absent, let insightface fetch it from its\n"
+              "    # publisher (github.com/deepinsight/insightface releases v0.7).\n"
+              "    _ff_dest = os.path.join(os.path.expanduser(\"~\"), \".insightface\", \"models\", name)\n"
+              "    if not os.path.isdir(_ff_dest):\n"
+              "        from modules import faceforge_runtime as _ffr\n"
+              "        _ffr.license_notice(name, \"https://github.com/deepinsight/insightface/releases/download/v0.7/\" + name + \".zip\")\n"
+              "        return True\n"
+              "    members = [n for n in MODEL_SIZES if n.startswith(f\"{name}/\")]\n",
+              "model_downloader: insightface pack from publisher")
+
+    # 6. OpenVINO device selection. Verified: "AUTO:GPU,NPU,CPU" fails to
+    #    initialise when listed devices are missing and ORT silently uses CPU.
+    p.replace("modules/platform_info.py",
+              "    {\"device_type\": \"AUTO:GPU,NPU,CPU\"},",
+              "    {\"device_type\": __import__(\"os\").environ.get(\"FACEFORGE_OV_DEVICE\", \"AUTO\")},",
+              "platform_info: OpenVINO AUTO device")
+
+    # 7. The NSFW filter needs keras + a deep-learning backend we don't ship.
+    p.replace("modules/ui.py",
+              "    from numpy import ndarray\n    from modules.predicter import predict_frame, predict_image, predict_video\n",
+              "    from numpy import ndarray\n"
+              "    try:\n"
+              "        from modules.predicter import predict_frame, predict_image, predict_video\n"
+              "    except Exception:\n"
+              "        update_status(\"NSFW filter is not included in this build; skipping.\")\n"
+              "        return False\n",
+              "ui: NSFW filter optional")
 
 
-def _faceforge_requested_gpu() -> list:
-    return [p for p in modules.globals.execution_providers
-            if (p[0] if isinstance(p, tuple) else p) in _GPU_PROVIDERS]
+def main(argv: list[str]) -> int:
+    args = [a for a in argv if not a.startswith("--")]
+    root = pathlib.Path(args[0] if args else ".").resolve()
+    check_only = "--check" in argv
+    # Always dry-run first, so a mismatch never leaves upstream half-patched.
+    dry = Patcher(root, check_only=True)
+    if not check_only:
+        print("Checking patches...")
+    apply_all(dry)
+    if dry.failures or check_only:
+        p = dry
+    else:
+        print("\nApplying patches...")
+        p = Patcher(root)
+        apply_all(p)
+    if p.failures:
+        print("\nFaceforge patching FAILED - upstream changed:")
+        for f in p.failures:
+            print("  - " + f)
+        return 1
+    verb = "would apply" if p.check_only else "applied"
+    print(f"\nFaceforge patches OK: {len(p.applied)} {verb}, {len(p.skipped)} already present.")
+    return 0
 
 
-def _faceforge_prefers_fp16() -> bool:
-    # FACEFORGE_FP32=1 forces fp32 (e.g. GTX 16xx cards that NaN on fp16).
-    if os.environ.get("FACEFORGE_FP32") == "1":
-        return False
-    return _HAS_TORCH_CUDA or bool(_faceforge_requested_gpu())
-
-
-def _faceforge_cuda_graphs_ok() -> bool:
-    if os.environ.get("FACEFORGE_NO_CUDA_GRAPH") == "1":
-        return False
-    return "CUDAExecutionProvider" in modules.globals.execution_providers
-
-
-def _faceforge_report_providers(swapper) -> None:
-    session = getattr(swapper, "session", None)
-    session = getattr(session, "_underlying", session)
-    try:
-        active = session.get_providers()
-    except Exception:
-        return
-    print(f"[Faceforge] swap model running on: {active[0] if active else '?'}", flush=True)
-    wanted = _faceforge_requested_gpu()
-    if wanted and active and active[0] not in _GPU_PROVIDERS:
-        msg = ("GPU NOT IN USE - fell back to CPU, expect very low FPS. "
-               "Check GPU drivers (and CUDA 12 + cuDNN 9 for the cuda build).")
-        print("\\n" + "!" * 72 + f"\\n[Faceforge] {msg}\\n" + "!" * 72 + "\\n", flush=True)
-        update_status(msg, NAME)
-
-
-_HAS_TORCH_CUDA = False
-try:
-    import torch
-''',
-    "face_swapper: Faceforge helpers",
-)
-
-# 5. The NSFW filter needs keras + a deep-learning backend we don't ship.
-#    Make it degrade to "off" instead of crashing the run.
-patch(
-    "modules/ui.py",
-    "    from numpy import ndarray\n    from modules.predicter import predict_frame, predict_image, predict_video\n",
-    "    from numpy import ndarray\n"
-    "    try:\n"
-    "        from modules.predicter import predict_frame, predict_image, predict_video\n"
-    "    except Exception:\n"
-    "        update_status(\"NSFW filter is not included in this build; skipping.\")\n"
-    "        return False\n",
-    "ui: NSFW filter optional",
-)
-
-if failures:
-    print("\nFaceforge patching FAILED - upstream changed:")
-    for f in failures:
-        print("  - " + f)
-    sys.exit(1)
-print("\nAll Faceforge patches applied.")
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

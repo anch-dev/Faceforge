@@ -1,0 +1,11 @@
+# Upstream commit the Faceforge patches are tested against.
+# Builds use this commit unless a ref is given explicitly.
+# The free public source identifies itself as 2.1.6 (README heading) /
+# 2.1.5 (modules/metadata.py). "2.7.5 Ultimate" / "2.8 Ultimate" are paid
+# pre-built products from deeplivecam.net and are not this source.
+repo=hacksider/Deep-Live-Cam
+commit=f8f9b85275b06edc039a22d17867751e9f20933b
+commit_date=2026-10-22
+readme_version=2.1.6
+metadata_version=2.1.5
+verified=2026-10-24

@@ -1,0 +1,10 @@
+# Test / evaluation tooling (not shipped in the app).
+pytest==8.4.2
+numpy>=2.0,<3
+onnx==1.19.1
+onnxruntime==1.23.2
+onnxconverter-common==1.16.0
+opencv-python-headless==4.12.0.88
+psutil>=7
+pefile==2024.8.26
+pyyaml>=6

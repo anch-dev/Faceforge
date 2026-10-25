@@ -14,6 +14,9 @@ from PyInstaller.utils.hooks import (
 SPEC_DIR = SPECPATH  # set by PyInstaller: the folder containing this spec
 VARIANT = os.environ.get("FACEFORGE_VARIANT", "directml")
 
+# No model weights are bundled: models/ only holds upstream's instructions.txt.
+# Weights are downloaded on first use from their publishers (see
+# modules/faceforge_runtime.py) under their own licences.
 datas = [
     ("models", "models"),
     ("modules/ui.json", "modules"),
@@ -43,8 +46,11 @@ for py_file in glob.glob("modules/**/*.py", recursive=True):
     if mod not in SKIP:
         hiddenimports.append(mod)
 hiddenimports += collect_submodules("insightface")
-hiddenimports += ["onnxruntime", "onnxruntime.capi", "cv2_enumerate_cameras",
-                  "psutil", "requests", "certifi", "sklearn.cluster"]
+# onnxconverter_common: local fp32 -> fp16 conversion of the swap model
+# (modules.faceforge_runtime), so no third-party fp16 copy is downloaded.
+hiddenimports += collect_submodules("onnxconverter_common")
+hiddenimports += ["onnx", "onnx.numpy_helper", "onnxruntime", "onnxruntime.capi",
+                  "cv2_enumerate_cameras", "psutil", "requests", "certifi", "sklearn.cluster"]
 if sys.platform == "win32":
     hiddenimports += ["pygrabber", "pygrabber.dshow_graph"]
 

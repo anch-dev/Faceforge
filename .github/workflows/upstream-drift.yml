@@ -1,0 +1,26 @@
+name: Upstream drift check
+
+# Daily: do the Faceforge patches still apply to the latest public upstream?
+# Reports only. Never builds or releases; moving patches/UPSTREAM.lock forward
+# is a deliberate, reviewed change.
+on:
+  schedule:
+    - cron: '17 6 * * *'
+  workflow_dispatch:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Patch dry-run against upstream HEAD
+        run: |
+          git clone --depth 1 https://github.com/hacksider/Deep-Live-Cam.git upstream
+          HEAD_SHA=$(git -C upstream rev-parse HEAD)
+          LOCKED=$(sed -n 's/^commit=//p' patches/UPSTREAM.lock)
+          {
+            echo "Locked: \`$LOCKED\`"
+            echo "Upstream HEAD: \`$HEAD_SHA\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+          python patches/apply_faceforge.py upstream --check | tee result.txt
+          tail -1 result.txt >> "$GITHUB_STEP_SUMMARY"

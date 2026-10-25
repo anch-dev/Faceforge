@@ -1,18 +1,18 @@
 name: Build Faceforge (Windows)
 
+# Manual only. Releases are created as DRAFTS unless "publish" is ticked, so
+# nothing becomes public without a person approving it.
 on:
-  schedule:
-    - cron: '17 6 * * *'   # daily; only builds when upstream has a new commit
   workflow_dispatch:
     inputs:
       ref:
-        description: 'Upstream Deep-Live-Cam ref (branch, tag or SHA). Blank = latest.'
+        description: 'Upstream Deep-Live-Cam ref (blank = commit pinned in patches/UPSTREAM.lock)'
         type: string
         default: ''
       publish:
         description: 'Publish the release (otherwise it stays a draft)'
         type: boolean
-        default: true
+        default: false
 
 permissions:
   contents: write
@@ -20,46 +20,42 @@ permissions:
 env:
   UPSTREAM_REPO: hacksider/Deep-Live-Cam
   PYTHON_VERSION: '3.11'
-  ORT_GPU: onnxruntime-gpu==1.26.0            # built for CUDA 12.8 + cuDNN 9
-  ORT_DML: onnxruntime-directml==1.24.4
-  ORT_OPENVINO: onnxruntime-openvino==1.24.1
-  OPENVINO_RUNTIME: openvino==2025.4.1        # must match the version ORT-OpenVINO was built against
+  ORT_GPU: onnxruntime-gpu==1.26.0            # links cudart64_12, cublas(Lt)64_12, cufft64_11, cudnn64_9
+  ORT_DML: onnxruntime-directml==1.24.4       # bundles DirectML.dll 1.15.4
+  ORT_OPENVINO: onnxruntime-openvino==1.24.1  # Windows wheel does NOT include openvino.dll ...
+  OPENVINO_RUNTIME: openvino==2025.4.1        # ... so ship this exact build (2025.4.1.20426)
+  FP16_CONVERTER: onnxconverter-common==1.16.0
+  PYINSTALLER: pyinstaller==6.22.3
 
 jobs:
+  tests:
+    uses: ./.github/workflows/tests.yml
+
   check:
+    needs: tests
     runs-on: ubuntu-latest
     outputs:
-      skip: ${{ steps.check.outputs.skip }}
-      sha: ${{ steps.check.outputs.sha }}
-      short: ${{ steps.check.outputs.short }}
-      tag: ${{ steps.check.outputs.tag }}
+      sha: ${{ steps.ref.outputs.sha }}
+      short: ${{ steps.ref.outputs.short }}
+      tag: ${{ steps.ref.outputs.tag }}
     steps:
-      - id: check
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - uses: actions/checkout@v4
+      - id: ref
         run: |
           REF="${{ inputs.ref }}"
           if [ -n "$REF" ]; then
             SHA=$(git ls-remote "https://github.com/$UPSTREAM_REPO.git" "$REF" | head -1 | cut -f1)
             [ -z "$SHA" ] && SHA="$REF"
           else
-            SHA=$(git ls-remote "https://github.com/$UPSTREAM_REPO.git" HEAD | cut -f1)
+            SHA=$(sed -n 's/^commit=//p' patches/UPSTREAM.lock)
           fi
-          SHORT=${SHA:0:7}
           echo "sha=$SHA" >> "$GITHUB_OUTPUT"
-          echo "short=$SHORT" >> "$GITHUB_OUTPUT"
-          echo "tag=win-$SHORT-$(date +%Y%m%d-%H%M)" >> "$GITHUB_OUTPUT"
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            echo "skip=false" >> "$GITHUB_OUTPUT"
-          elif gh release list --repo "${{ github.repository }}" --json tagName -q '.[].tagName' | grep -q "^win-$SHORT-"; then
-            echo "skip=true" >> "$GITHUB_OUTPUT"; echo "Already built $SHORT."
-          else
-            echo "skip=false" >> "$GITHUB_OUTPUT"
-          fi
+          echo "short=${SHA:0:7}" >> "$GITHUB_OUTPUT"
+          echo "tag=win-${SHA:0:7}-$(date +%Y%m%d-%H%M)" >> "$GITHUB_OUTPUT"
+          echo "Building upstream $UPSTREAM_REPO@$SHA" >> "$GITHUB_STEP_SUMMARY"
 
   release:
     needs: check
-    if: needs.check.outputs.skip == 'false'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -67,7 +63,7 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           {
-            echo "Faceforge for Windows, built from [$UPSTREAM_REPO@${{ needs.check.outputs.short }}](https://github.com/$UPSTREAM_REPO/commit/${{ needs.check.outputs.sha }}) with the Faceforge performance patches."
+            echo "Faceforge for Windows, built from [$UPSTREAM_REPO@${{ needs.check.outputs.short }}](https://github.com/$UPSTREAM_REPO/commit/${{ needs.check.outputs.sha }}) with the Faceforge patches."
             echo
             cat docs/release-notes-windows.md
           } > notes.md
@@ -76,7 +72,6 @@ jobs:
 
   build:
     needs: [check, release]
-    if: needs.check.outputs.skip == 'false'
     runs-on: windows-latest
     strategy:
       fail-fast: false
@@ -120,7 +115,6 @@ jobs:
           #  - opencv-python: the headless build is enough (UI is PySide6)
           #  - opennsfw2/keras: NSFW filter needs a deep-learning backend (GBs)
           grep -viE '^(onnxruntime|opencv-python==|opennsfw2|keras)' requirements.txt > req-faceforge.txt
-          cat req-faceforge.txt
           pip install -r req-faceforge.txt
           pip uninstall -y onnxruntime onnxruntime-gpu onnxruntime-directml onnxruntime-openvino torch tensorflow 2>/dev/null || true
           case "${{ matrix.variant }}" in
@@ -128,17 +122,9 @@ jobs:
             directml) pip install "$ORT_DML" ;;
             openvino) pip install "$ORT_OPENVINO" "$OPENVINO_RUNTIME" ;;
           esac
-          pip install pyinstaller
+          pip install "$FP16_CONVERTER" "$PYINSTALLER"
+          pip freeze > ../pip-freeze-${{ matrix.variant }}.txt
           python -c "import onnxruntime as o; print(o.__version__, o.get_available_providers())"
-
-      - name: Download models
-        run: |
-          cd upstream/models
-          HF=https://huggingface.co/hacksider/deep-live-cam/resolve/main
-          # fp16 swap model only: the patched app uses it on every GPU backend.
-          curl -fL -o inswapper_128_fp16.onnx "$HF/inswapper_128_fp16.onnx?download=true"
-          curl -fL -o GPEN-BFR-256.onnx "$HF/GPEN-BFR-256.onnx?download=true"
-          ls -la
 
       - name: Download FFmpeg
         run: |
@@ -162,6 +148,11 @@ jobs:
             sed "s/__PROVIDER__/${{ matrix.provider }}/" faceforge/build/launchers/Faceforge.bat > "$APP/Faceforge.bat"
           fi
           cp faceforge/docs/README-windows.txt "$APP/README.txt"
+          cp pip-freeze-${{ matrix.variant }}.txt "$APP/BUILD-DEPENDENCIES.txt"
+          # Guard: release zips must not contain model weights.
+          if find "$APP" -iname "*.onnx" | grep -q .; then
+            echo "::error::Model weights found in the app folder"; find "$APP" -iname "*.onnx"; exit 1
+          fi
           du -sh "$APP"
 
       - name: Smoke test - app starts
@@ -171,21 +162,35 @@ jobs:
           timeout 40 ./Faceforge.exe --execution-provider ${{ matrix.provider }} || code=$?
           if [ "${code:-0}" -ne 124 ]; then echo "App exited early with code ${code}"; exit 1; fi
 
-      - name: Smoke test - GPU backend loads
-        if: matrix.variant != 'cuda'   # runners have no NVIDIA GPU
-        # Runners have no real GPU; DirectML may not initialise on the software
-        # adapter, so only OpenVINO (which can run on the CPU device) is fatal.
-        continue-on-error: ${{ matrix.variant == 'directml' }}
+      - name: Smoke test - backend loads
         env:
           FACEFORGE_SELFTEST: ${{ matrix.provider }}
         run: |
           cd upstream/dist/Faceforge
-          ./Faceforge.exe
+          set +e
+          ./Faceforge.exe --execution-provider ${{ matrix.provider }} 2>&1 | tee selftest.log
+          code=${PIPESTATUS[0]}
+          set -e
+          echo "### ${{ matrix.variant }} self-test (exit $code)" >> "$GITHUB_STEP_SUMMARY"
+          grep "\[selftest\]" selftest.log >> "$GITHUB_STEP_SUMMARY" || true
+          case "${{ matrix.variant }}" in
+            openvino)
+              # OpenVINO's CPU device exists on every runner: must load.
+              [ "$code" -eq 0 ] || { echo "::error::OpenVINO provider did not load"; exit 1; } ;;
+            cuda)
+              # Runners have no NVIDIA GPU: expect an honest failure that names the missing DLLs.
+              [ "$code" -eq 3 ] || { echo "::error::expected exit 3 (no GPU), got $code"; exit 1; }
+              grep -q "could not be loaded" selftest.log || { echo "::error::missing-DLL diagnostic not shown"; exit 1; } ;;
+            directml)
+              # Runners have only a software adapter; record the result without failing.
+              [ "$code" -eq 0 ] || echo "::warning::DirectML did not load on the runner's software adapter (exit $code)" ;;
+          esac
 
       - name: Zip and upload
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          rm -f upstream/dist/Faceforge/selftest.log
           cd upstream/dist
           7z a -mx1 "../../Faceforge-windows-${{ matrix.variant }}.zip" Faceforge/ > /dev/null
           cd ../..
@@ -194,7 +199,7 @@ jobs:
 
   publish:
     needs: [check, build]
-    if: needs.check.outputs.skip == 'false' && (github.event_name == 'schedule' || inputs.publish)
+    if: inputs.publish
     runs-on: ubuntu-latest
     steps:
       - env:
