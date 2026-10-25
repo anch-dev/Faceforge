@@ -1,0 +1,30 @@
+{
+ "error": {
+  "hex": "4646473108000000000000207b226d657373616765223a2277726f6e672070616972696e6720636f6465227d",
+  "json": {
+   "message": "wrong pairing code"
+  }
+ },
+ "frame": {
+  "client_time_us": 1234567890123,
+  "frame_id": 7,
+  "hex": "464647310500000000000019000000070000011f71fb04cbffd8ffe000104a46494600ffd9",
+  "jpeg_hex": "ffd8ffe000104a46494600ffd9"
+ },
+ "hello": {
+  "hex": "46464731010000000000002e7b22636c69656e74223a22696f73222c2270726f746f636f6c223a312c22746f6b656e223a22313233343536227d",
+  "json": {
+   "client": "ios",
+   "protocol": 1,
+   "token": "123456"
+  }
+ },
+ "result": {
+  "client_time_us": 1234567890123,
+  "face_found": true,
+  "frame_id": 7,
+  "hex": "46464731060000000000001e000000070000011f71fb04cb4148000001ffd8ffe000104a46494600ffd9",
+  "jpeg_hex": "ffd8ffe000104a46494600ffd9",
+  "server_ms": 12.5
+ }
+}

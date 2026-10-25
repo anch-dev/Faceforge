@@ -1,6 +1,6 @@
 # Faceforge
 
-Performance-tuned Windows builds of the public [Deep-Live-Cam](https://github.com/hacksider/Deep-Live-Cam) source, plus shared tooling for an iOS port. This is an unofficial community project, not affiliated with the Deep-Live-Cam developers or their paid "Ultimate" builds.
+Performance-tuned Windows builds of the public [Deep-Live-Cam](https://github.com/hacksider/Deep-Live-Cam) source, plus an iPhone app that swaps on-device or offloads to your PC's GPU. This is an unofficial community project, not affiliated with the Deep-Live-Cam developers or their paid "Ultimate" builds.
 
 > Get consent before using a real person's face, and label anything you share as a deepfake. You are responsible for how you use it.
 
@@ -25,13 +25,15 @@ Builds come from upstream source at the commit pinned in `patches/UPSTREAM.lock`
 | `patches/` | Upstream patches, the runtime helper module, and the pinned upstream commit |
 | `build/` | PyInstaller spec, startup hook (DLL setup, CUDA preflight, backend self-test), launchers |
 | `faceforge_eval/` | Reference face pipeline (detect → embed → swap → composite) on ONNX Runtime. It's the shared benchmark for Windows backends and the golden reference for iOS. |
+| `ios/` | SwiftUI iPhone app (`Faceforge/`) and its tested Swift core (`FaceforgeCore/`). Built as an unsigned .ipa by `build-ios.yml`. |
+| `faceforge_server/`, `server/` | PC offload server for the iPhone app. Run `server\Start-Faceforge-Server.bat`. Protocol: `docs/offload-protocol.md`. |
 | `faceforge_audio/` | Separate voice-processing contract and latency harness (no voice model yet) |
 | `tools/` | `eval_pipeline.py` (FPS, 1%-low, latency, memory, identity quality), `bench_models.py`, `convert_fp16.py`, `convert_coreml.py` |
 | `tests/` | `pip install -r requirements-dev.txt && pytest`. Set `FACEFORGE_UPSTREAM` (an upstream checkout) and `FACEFORGE_WEIGHTS` to run the optional tests. |
 
 ## Building
 
-Actions → **Build Faceforge (Windows)** → Run workflow. Builds are manual, and releases stay drafts unless "publish" is ticked. A daily job only checks whether the patches still apply to the latest upstream.
+Actions → **Build Faceforge (Windows)** or **Build Faceforge (iOS)** → Run workflow. The iOS build produces an unsigned `Faceforge.ipa` for SideStore/AltStore; see `docs/release-notes-ios.md`. Windows builds are manual; the iOS build also runs on pushes that touch `ios/` (artifact only, no release). Releases are created only by manual runs and stay drafts unless "publish" is ticked. A daily job only checks whether the patches still apply to the latest upstream.
 
 ## License
 

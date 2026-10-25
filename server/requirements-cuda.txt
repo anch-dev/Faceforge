@@ -1,0 +1,10 @@
+# Faceforge offload server, NVIDIA (RTX 30xx/40xx/50xx).
+# The [cuda,cudnn] extras install CUDA 12 runtime + cuDNN 9 as pip wheels,
+# so only the NVIDIA driver is needed - no CUDA Toolkit install.
+onnxruntime-gpu[cuda,cudnn]==1.26.0
+onnx==1.19.1
+onnxconverter-common==1.16.0
+opencv-python-headless==4.12.0.88
+numpy>=2.0,<3
+psutil>=7
+zeroconf>=0.136

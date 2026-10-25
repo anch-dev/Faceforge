@@ -4,3 +4,12 @@ dist/
 build/build/
 *.zip
 .pytest_cache/
+ios/Vendor/
+ios/build/
+ios/*.xcodeproj/
+ios/Faceforge/Info.plist
+ios/Payload/
+ios/FaceforgeCore/.build/
+*.ipa
+models/
+.venv-server-*/

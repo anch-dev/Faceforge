@@ -160,18 +160,46 @@ Why use native Core ML rather than ONNX Runtime's Core ML provider? ONNX Runtime
 
 ---
 
-## 5. iOS plan (Swift + Core ML)
+## 5. iOS app and PC offload (built; not yet compiled or run)
 
-Constraints: no Mac, so builds go through GitHub Actions macOS runners as an unsigned IPA for SideStore. Faceforge does not ship weights.
+Your answers: RTX 3080 (Ti) PC, iPhone 16 Pro Max, private use, HyperSwap only if needed.
 
-1. **Model delivery.** You convert your own copies on your PC with `tools/convert_coreml.py` and import the `.mlpackage` files through the Files app. The app compiles them on device with `MLModel.compileModel(at:)`.
-2. **Pipeline.** It mirrors `faceforge_eval` stage for stage: Detector → Embedder (once per source) → Swapper → Compositor. The Python version is the golden reference.
-3. **Camera.** `AVCaptureSession` delivering BGRA at 640x480 or 720p, with `alwaysDiscardsLateVideoFrames` on, so only the newest frame is processed. Detection runs every N frames, as in Deep-Live-Cam; compositing uses Core Image or Metal.
-4. **Thermal.** Watch `ProcessInfo.thermalState` (iOS 11+ **[Verified]**):
-   - `serious`: cap FPS and detect less often.
-   - `critical`: pause.
-5. **Memory.** About 360 MB of fp16 weights plus activations. Load the swapper lazily and release it when backgrounded. iOS memory limits for a sideloaded app are **[Unresolved]**.
-6. **Output.** Recording inside the app and export through the share sheet. No claims of a system-wide virtual camera.
+The app is a SwiftUI app in `ios/`, built as an **unsigned .ipa on a GitHub macOS runner** for SideStore. It has two modes.
+
+**On iPhone.** The phone downloads the official ONNX models straight from InsightFace (about 840 MB, size and SHA-256 checked, licence accepted in-app). It runs them with **ONNX Runtime's Core ML provider** on the Neural Engine. This replaces my earlier plan of converting to Core ML on your PC, because:
+- coremltools has **no Windows wheels** (9.0 ships macOS and Linux only) **[Verified]**.
+- ONNX Runtime **1.26.0+** runs `Pad(reflect)` and BatchNorm inside Core ML ML Program (commit `fb13eb3`, PR #28073, present in every release from 1.26.0 through 1.29.1) **[Verified in source]**.
+- The official Swift package still pins 1.24.2 **[Verified]**, so the workflow tries 1.29.1 → 1.26.0 first and falls back to 1.24.2 with a warning (Pads on CPU, slower).
+- Compiled Core ML models are cached across launches (`ModelCacheDirectory`).
+- The swapper's `emap` matrix is read straight from the model file by a small protobuf reader, since ONNX Runtime drops unused initializers.
+
+**PC offload.** The phone streams JPEG frames over the local Wi-Fi to `server/Start-Faceforge-Server.bat` on your PC, which runs the verified `faceforge_eval` pipeline on CUDA.
+- `onnxruntime-gpu[cuda,cudnn]==1.26.0` pulls CUDA 12 + cuDNN 9 as pip wheels, so you need only the NVIDIA driver **[Verified: resolves for Windows / Python 3.11]**.
+- The protocol (`docs/offload-protocol.md`) uses a 6-digit pairing code, one device at a time, and at most 2 frames in flight.
+- Bonjour lets the phone find the PC without typing an IP.
+
+| Mode | Status |
+|---|---|
+| Still photo, on iPhone or PC | Built |
+| Live camera, on iPhone | Built, with thermal governor (`serious`: 15 FPS cap; `critical`: pause) and stats (backend, FPS, 1%-low, per-stage ms) |
+| Live camera, PC offload | Built, with round-trip latency shown |
+| Prerecorded video | Not built yet |
+| Act as a camera or mic for other apps | **Not supported by iOS** (section 4) |
+
+**Verified here:**
+- Server: protocol, pairing, busy handling, and a real swap over TCP (CPU, about 2 s per frame in the sandbox).
+- The command-line launcher, and Bonjour discovery with `zeroconf`.
+- Golden fixtures (alignment, detector decoding, ONNX initializer read, protocol bytes) generated from the verified Python reference.
+- The Swift catalog and protocol constants match Python.
+- The ONNX Runtime package patch, dry-run against the pinned package.
+
+**Unverified:**
+- The Swift code has **not been compiled yet**. That needs the macOS runner, which needs a push. Expect a round or two of compile fixes.
+- On-iPhone speed, memory and thermals.
+- Offload speed on your 3080 and Wi-Fi.
+- Whether a 1.26+ iOS ONNX Runtime archive is actually downloadable from `download.onnxruntime.ai`. It's blocked from this sandbox; the workflow reports which version it used.
+
+**Licensing:** the app and server never ship weights. Both download from InsightFace with its non-commercial licence shown, which fits your private use.
 
 ---
 
@@ -199,9 +227,9 @@ All the latency figures are vendor claims, not measurements **[Estimate]**. Reco
 | **0 (this branch)** | Patches, runtime helpers, eval and audio harnesses, CI, docs | All tests pass on Python 3.11 **[met]**. Release zips contain no `.onnx` (CI guard). Builds are manual, and releases are drafts by default. |
 | 1. Windows on real hardware | Push after your approval, run the workflow, test each zip on your PC | For each backend you have: all 3 models report the requested provider. `eval_pipeline.py` on your GPU reports avg FPS, 1%-low, p95 latency and peak VRAM; target **>= 20 FPS avg, >= 12 FPS 1%-low at 640x480** on a mid-range GPU **[target, not a measurement]**. First-run download plus fp16 conversion completes with the licence notice shown. |
 | 2. HyperSwap evaluation | Get the ResearchRAIL-MS terms; if acceptable, test the adapter | Output matches FaceFusion within 2/255 mean on aligned crops. Identity similarity >= 0.848 (the inswapper figure) on the same image set. Latency reported per backend. |
-| 3. iOS still image | Swift app with user-imported Core ML models | Aligned-crop output within mean 2/255 of the Python reference. Single-image latency measured on your iPhone. |
+| 3. iOS build + still image | CI compiles the app (`build-ios.yml`); install via SideStore; Photo tab on iPhone and on PC | CI green (Swift core tests pass against fixtures, IPA built, no weights inside). Photo swap works in both modes; time per photo reported. |
 | 4. iOS video file | Offline processing with progress and export | Processes a 10 s 720p clip without exceeding memory limits; time per frame reported. |
-| 5. iOS live camera | Camera pipeline with thermal governor | 10 minutes sustained without reaching `critical`; reports median and 1%-low FPS. Proceed only if median >= 10 FPS. |
+| 5. iOS live camera | On-device and PC offload live modes | On iPhone: 10 minutes sustained without `critical`; median and 1%-low FPS recorded. PC offload: >= 20 FPS with < 120 ms median round trip on 5 GHz Wi-Fi **[targets]**. |
 | 6. Voice | RVC/VCClient evaluation, then integration | Real-time factor < 0.5. Pipeline latency (block + algorithmic + p95 processing) <= 150 ms on your PC. Zero underruns over 5 minutes. |
 
 ---
@@ -230,7 +258,9 @@ Also run by hand, outside pytest: patched upstream Deep-Live-Cam code with real 
 - The third-party fp16 mirror is blocked.
 - `buffalo_l` defers to InsightFace's release.
 
-**Not run:** the Windows build itself, any GPU, macOS, or an iPhone. The CI workflow has not executed because nothing is pushed.
+**Second session (iOS + offload):** 72 passed, 1 skipped with real weights; 63 passed, 10 skipped in a clean CI-like environment (Python 3.11.17). Adds server, protocol, fixture and Swift-consistency tests, including a real face swap through the TCP server.
+
+**Not run:** the Windows build itself, any GPU, macOS, the Swift compiler, or an iPhone. No CI workflow has executed because nothing is pushed.
 
 ### Files
 
@@ -250,16 +280,24 @@ Changed in this session:
 - `.github/workflows/build-windows.yml` (pinned commit, no weights, manual-only, draft releases)
 - `docs/release-notes-windows.md`, `docs/README-windows.txt`, `README.md`
 
+Added in the iOS and offload commit:
+- **iOS app:** `ios/project.yml`, `ios/Faceforge/` (app, camera, imaging, engine, offload, views), `ios/FaceforgeCore/` (Swift core package and tests)
+- **PC server:** `faceforge_server/`, `server/` (Windows launcher, CUDA and DirectML requirement files), `faceforge_eval/models.py`
+- **Shared:** `docs/offload-protocol.md`, `docs/release-notes-ios.md`, `tools/make_fixtures.py`, `tests/fixtures/`
+- **Tests:** `tests/test_server.py`, `tests/test_fixtures.py`, `tests/test_ios_sources.py`
+- **CI:** `.github/workflows/build-ios.yml`
+
 ### Rollback
 
 Nothing has been pushed, so all of this lives only in the local clone:
+- To drop only the iOS/offload work: `git reset --hard d540efb`.
 - To discard this session's work but keep the earlier commit: `git reset --hard 0b339f5` on `feature/windows-build`.
 - To discard everything: `git branch -D feature/windows-build`.
 
 The remote `anch-dev/Faceforge` is untouched, and no release or release branch exists.
 
-## 9. Open questions for you
+## 9. Answered
 
-1. **Hardware.** Which GPU is in your Windows PC, and which iPhone model do you have? These decide which backends and targets get tested first.
-2. **Commercial use.** Is any use commercial? If so, every swap pipeline evaluated here is blocked by its weight licence.
-3. **HyperSwap terms.** Do you want me to pursue the full ResearchRAIL-MS text from FaceFusion?
+1. **Hardware:** RTX 3080 (Ti), iPhone 16 Pro Max.
+2. **Use:** private, non-commercial.
+3. **HyperSwap:** only if needed; not pursued for now.

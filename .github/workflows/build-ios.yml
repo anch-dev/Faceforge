@@ -1,0 +1,134 @@
+name: Build Faceforge (iOS)
+
+# Unsigned .ipa for sideloading (SideStore / AltStore re-sign it on install).
+# Runs on pushes that touch ios/ (build check + artifact) and manually.
+# A GitHub release is created only on manual runs, as a DRAFT unless "publish".
+on:
+  push:
+    paths: ['ios/**', 'tests/fixtures/**', '.github/workflows/build-ios.yml']
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: 'Publish the release (otherwise it stays a draft)'
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+env:
+  # Official Swift package (pinned commit). Its default runtime is ORT 1.24.2,
+  # whose Core ML provider lacks Pad(reflect) in ML Program mode; ORT >= 1.26
+  # has it (onnxruntime commit fb13eb3, PR #28073), so newer runtimes are tried first.
+  ORT_SPM_COMMIT: b7fb7f7
+  ORT_IOS_CANDIDATES: '1.29.1 1.28.0 1.27.0 1.26.0'
+
+jobs:
+  core-tests:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - name: FaceforgeCore unit tests (golden fixtures)
+        run: swift test --package-path ios/FaceforgeCore
+
+  build:
+    needs: core-tests
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Toolchain versions
+        run: |
+          xcodebuild -version
+          swift --version
+
+      - name: Vendor ONNX Runtime Swift package
+        id: ort
+        run: |
+          git clone https://github.com/microsoft/onnxruntime-swift-package-manager ios/Vendor/onnxruntime-spm
+          git -C ios/Vendor/onnxruntime-spm checkout "$ORT_SPM_COMMIT"
+          cd ios/Vendor/onnxruntime-spm
+          USED="1.24.2 (package default)"
+          for v in $ORT_IOS_CANDIDATES; do
+            if curl -fsSL -o ort-pod.zip "https://download.onnxruntime.ai/pod-archive-onnxruntime-c-$v.zip" \
+               && unzip -l ort-pod.zip | grep -q "onnxruntime.xcframework/"; then
+              # Point the package's local-archive branch at the downloaded runtime.
+              python3 - <<'PY'
+          import pathlib
+          p = pathlib.Path("Package.swift")
+          s = p.read_text()
+          old = 'if let pod_archive_path = ProcessInfo.processInfo.environment["ORT_POD_LOCAL_PATH"] {'
+          assert old in s, "Package.swift layout changed"
+          p.write_text(s.replace(old, 'if let pod_archive_path = Optional("ort-pod.zip") {'))
+          PY
+              USED="$v"
+              break
+            fi
+            rm -f ort-pod.zip
+          done
+          echo "ONNX Runtime for iOS: $USED"
+          echo "version=$USED" >> "$GITHUB_OUTPUT"
+          echo "ONNX Runtime for iOS: **$USED**" >> "$GITHUB_STEP_SUMMARY"
+          case "$USED" in 1.24.2*) echo "::warning::Using ORT 1.24.2: inswapper's Pad ops will run on CPU (slower).";; esac
+
+      - name: Generate Xcode project
+        run: |
+          brew install xcodegen
+          cd ios && xcodegen generate
+
+      - name: Build (unsigned, device)
+        run: |
+          cd ios
+          set +e
+          xcodebuild -project Faceforge.xcodeproj -scheme Faceforge -configuration Release \
+            -sdk iphoneos -destination 'generic/platform=iOS' -derivedDataPath build \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" \
+            build > xcodebuild.log 2>&1
+          rc=$?
+          set -e
+          grep -E "error:|BUILD (SUCCEEDED|FAILED)" xcodebuild.log | head -60 || true
+          if [ "$rc" -ne 0 ]; then tail -80 xcodebuild.log; fi
+          exit "$rc"
+
+      - name: Upload build log on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: xcodebuild-log-${{ github.sha }}
+          path: ios/xcodebuild.log
+          retention-days: 7
+
+      - name: Package .ipa
+        run: |
+          cd ios
+          APP=build/Build/Products/Release-iphoneos/Faceforge.app
+          test -d "$APP"
+          if find "$APP" -iname "*.onnx" -o -iname "*.mlmodelc" | grep -q .; then
+            echo "::error::Model weights found in the app bundle"; exit 1
+          fi
+          mkdir -p Payload && cp -R "$APP" Payload/
+          zip -qry ../Faceforge.ipa Payload
+          ls -la ../Faceforge.ipa
+          echo "IPA size: $(du -h ../Faceforge.ipa | cut -f1)" >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Faceforge-ios-${{ github.sha }}
+          path: Faceforge.ipa
+          retention-days: 30
+
+      - name: Draft release (manual runs only)
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="ios-${GITHUB_SHA::7}-$(date +%Y%m%d-%H%M)"
+          {
+            echo "Unsigned Faceforge for iPhone (iOS 17+), ONNX Runtime ${{ steps.ort.outputs.version }}."
+            echo
+            cat docs/release-notes-ios.md
+          } > notes.md
+          FLAGS="--draft"
+          if [ "${{ inputs.publish }}" = "true" ]; then FLAGS="--prerelease"; fi
+          gh release create "$TAG" Faceforge.ipa --repo "${{ github.repository }}" \
+            --title "Faceforge iOS ${GITHUB_SHA::7}" --notes-file notes.md $FLAGS
