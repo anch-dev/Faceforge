@@ -10,7 +10,7 @@ Extract, then run `Faceforge.bat` (not the .exe directly; the .bat selects the G
 
 ### Models are not included
 
-Faceforge does not redistribute model weights. On first use the app downloads them from their publishers, about 840 MB in total:
+Faceforge does not redistribute model weights. On first launch the app downloads them from their publishers, about 840 MB in total:
 
 - `inswapper_128.onnx` from InsightFace's GitHub release
 - the `buffalo_l` detection and recognition pack from InsightFace's GitHub release

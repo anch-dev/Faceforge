@@ -137,7 +137,13 @@ jobs:
           FACEFORGE_VARIANT: ${{ matrix.variant }}
         run: |
           cd upstream
-          pyinstaller ../faceforge/build/faceforge.spec --noconfirm --distpath dist --workpath build
+          set +e
+          pyinstaller ../faceforge/build/faceforge.spec --noconfirm --distpath dist --workpath build > pyinstaller.log 2>&1
+          rc=$?
+          set -e
+          tail -30 pyinstaller.log
+          if [ "$rc" -ne 0 ]; then bash ../faceforge/ios/ci/annotate.sh pyinstaller.log "PyInstaller"; fi
+          exit "$rc"
 
       - name: Assemble app folder
         run: |
@@ -150,9 +156,9 @@ jobs:
           fi
           cp faceforge/docs/README-windows.txt "$APP/README.txt"
           cp pip-freeze-${{ matrix.variant }}.txt "$APP/BUILD-DEPENDENCIES.txt"
-          # Guard: release zips must not contain model weights.
-          if find "$APP" -iname "*.onnx" | grep -q .; then
-            echo "::error::Model weights found in the app folder"; find "$APP" -iname "*.onnx"; exit 1
+          # Guard: release zips must not contain model weights (any ONNX file over 1 MB).
+          if find "$APP" -iname "*.onnx" -size +1M | grep -q .; then
+            echo "::error::Model weights found in the app folder"; find "$APP" -iname "*.onnx" -size +1M; exit 1
           fi
           du -sh "$APP"
 

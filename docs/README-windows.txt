@@ -4,8 +4,8 @@ FACEFORGE (Windows)
 Start it with Faceforge.bat, not Faceforge.exe. The .bat picks the GPU backend.
 
 FIRST RUN
-Model weights are not included. The first time you click Live, the app
-downloads them from InsightFace's own GitHub releases (about 840 MB) and
+Model weights are not included. On first launch the app downloads them
+from InsightFace's own GitHub releases (about 840 MB) and
 prints the source and licence first. InsightFace models are licensed for
 non-commercial research use only. GPU builds then make a one-time fp16
 copy of the swap model.

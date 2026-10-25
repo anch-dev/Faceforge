@@ -1,6 +1,6 @@
 # -*- mode: python ; coding: utf-8 -*-
 # PyInstaller spec for Faceforge (Deep-Live-Cam v2.8+, PySide6 UI).
-# Run from the upstream checkout root: pyinstaller ../build/faceforge.spec
+# Run from the upstream checkout root: pyinstaller ../faceforge/build/faceforge.spec
 import glob
 import os
 import sys
@@ -12,18 +12,22 @@ from PyInstaller.utils.hooks import (
 )
 
 SPEC_DIR = SPECPATH  # set by PyInstaller: the folder containing this spec
+# PyInstaller resolves relative paths against the spec's folder, not the
+# working directory, so everything upstream is addressed from ROOT explicitly.
+ROOT = os.path.abspath(os.environ.get("FACEFORGE_UPSTREAM_ROOT", os.getcwd()))
 VARIANT = os.environ.get("FACEFORGE_VARIANT", "directml")
 
 # No model weights are bundled: models/ only holds upstream's instructions.txt.
 # Weights are downloaded on first use from their publishers (see
 # modules/faceforge_runtime.py) under their own licences.
 datas = [
-    ("models", "models"),
-    ("modules/ui.json", "modules"),
-    ("locales", "locales"),
+    (os.path.join(ROOT, "models"), "models"),
+    (os.path.join(ROOT, "modules", "ui.json"), "modules"),
+    (os.path.join(ROOT, "locales"), "locales"),
 ]
 datas += collect_data_files("insightface")
-datas += collect_data_files("onnxruntime")
+# onnxruntime/datasets holds tiny test models; not needed at runtime.
+datas += collect_data_files("onnxruntime", excludes=["**/datasets/**"])
 
 binaries = collect_dynamic_libs("onnxruntime")
 binaries += collect_dynamic_libs("cv2")
@@ -40,7 +44,8 @@ if VARIANT == "openvino":
 # Skip leftovers from the old Tk UI and the NSFW predictor (needs keras).
 SKIP = {"modules.run", "modules.ui_tooltip", "modules.tkinter_fix", "modules.predicter"}
 hiddenimports = []
-for py_file in glob.glob("modules/**/*.py", recursive=True):
+for py_file in glob.glob(os.path.join(ROOT, "modules", "**", "*.py"), recursive=True):
+    py_file = os.path.relpath(py_file, ROOT)
     mod = py_file.replace("\\", "/").replace("/", ".").removesuffix(".py")
     mod = mod.removesuffix(".__init__")
     if mod not in SKIP:
@@ -62,8 +67,8 @@ excludes = [
 ]
 
 a = Analysis(
-    ["run.py"],
-    pathex=["."],
+    [os.path.join(ROOT, "run.py")],
+    pathex=[ROOT],
     binaries=binaries,
     datas=datas,
     hiddenimports=hiddenimports,
