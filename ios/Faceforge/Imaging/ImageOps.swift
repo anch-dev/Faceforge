@@ -110,16 +110,27 @@ final class ImageOps {
         return CIImage(cvPixelBuffer: pb)
     }
 
-    /// Feathered mask for a crop of `size` px (white centre, soft edges);
-    /// same shape as faceforge_eval.compositor.
+    /// Feathered oval over the face for a crop of `size` px, in ArcFace-template
+    /// proportions (eyes ~46% down, mouth ~83%). The crop's corners hold
+    /// background from the frame the swap was made from; a square mask pasted
+    /// them back, which showed as a box that trailed behind a moving head
+    /// (0.1.3). The oval fades out before reaching them.
     func softMask(size: Int) -> CIImage {
         if let m = masks[size] { return m }
-        let s = CGFloat(size), pad = max(2, s * 0.06)
-        let white = CIImage(color: .white).cropped(to: CGRect(x: pad, y: pad, width: s - 2 * pad, height: s - 2 * pad))
-        let black = CIImage(color: .black).cropped(to: CGRect(x: 0, y: 0, width: s, height: s))
-        let m = white.composited(over: black)
-            .applyingGaussianBlur(sigma: Double(max(3, s * 0.08)) / 3)
-            .cropped(to: CGRect(x: 0, y: 0, width: s, height: s))
+        let s = CGFloat(size)
+        let crop = CGRect(x: 0, y: 0, width: s, height: s)
+        let gradient = CIFilter(name: "CIRadialGradient", parameters: [
+            "inputCenter": CIVector(x: 0, y: 0),
+            "inputRadius0": s * 0.28,          // fully swapped inside
+            "inputRadius1": s * 0.40,          // fully original outside
+            "inputColor0": CIColor.white,
+            "inputColor1": CIColor.black,
+        ])!.outputImage!
+        // Stretch to an oval, centre it at 55% down (CI y is bottom-up).
+        let oval = gradient
+            .transformed(by: CGAffineTransform(scaleX: 1, y: 1.28))
+            .transformed(by: CGAffineTransform(translationX: s * 0.5, y: s * (1 - 0.55)))
+        let m = oval.composited(over: CIImage(color: .black)).cropped(to: crop)
         masks[size] = m
         return m
     }
